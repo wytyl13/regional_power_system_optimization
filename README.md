@@ -5,6 +5,7 @@
 git clone http://10.83.42.206:3000/weiyutao/regional_power_system_optimization.git
 cd regional_power_system_optimization/power_opt
 conda create --name power_opt python=3.10
+conda activate power_opt
 pip install -r requirements.txt
 $env:GRB_LICENSE_FILE="C:\gurobi1300\win64\bin\gurobi.lic"; python -X utf8 solve.py
 
