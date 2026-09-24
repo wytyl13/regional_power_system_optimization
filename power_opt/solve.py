@@ -234,13 +234,14 @@ if __name__ == "__main__":
     import time
     t0 = time.perf_counter()
     inp = reader.load_inputs()
-    m, coal, _gas, _nuc, _bio, _ps, _es, _hyd, Tv, \
-        _Gv, _Nv, _Bv, _Pv, _Ev, _Hv, Sv = solve(inp)
+    m, coal, gas, nuc, bio, ps, es, hyd, Tv, \
+        Gv, Nv, Bv, Pv, Ev, Hv, Sv = solve(inp)
     if m.SolCount > 0:                                   # 无可行解不出图（对齐 plot.main 的判断）
         import plot as PL                                 # 放 __main__ 里延迟导入，避免和 plot.py 顶部的 import solve 循环
         PL.plt.rcParams["font.family"] = ["Microsoft YaHei"]   # 汉字字体，plot.main 原有设置
         PL.plt.rcParams["axes.unicode_minus"] = False
-        PL.plot_operation(inp, coal, Tv, Sv, save_png=True)
+        PL.plot_operation(inp, coal, gas, nuc, bio, ps, es, hyd,
+                          Tv, Gv, Nv, Bv, Pv, Ev, Hv, Sv, save_png=True)
     print("---- 本次配置 ----")
     print("时段数 T=%d  起始 %s  步长 %g h" % (config.T, config.START_TIME, config.DELTA_T))
     print("MIPGap=%g  时限 %gs  省间互济=%s  既定跨区送电=%s"

@@ -37,35 +37,49 @@ DEVICE_COLORS = np.array([
     [0.49, 0.47, 0.65], [0.71, 0.63, 0.48], [0.85, 0.26, 0.30]])
 
 
-def build_device_data(inp, coal, Tv, Sv):
-    """MATLAB 1219-1230 plotDeviceData：21 列设备×分区×小时，发电正/充电负。
-    煤电单测：除煤电、省内净交换外全为 0 矩阵（A_* 聚合对 0 台机 = 零）。"""
-    Z = lambda *shape: np.zeros(shape)                      # 空表电源聚合项 = 0
-    A_th = Z(inp.Narea, coal.N_th); A_th[coal.area_th, np.arange(coal.N_th)] = 1
+def build_device_data(inp, coal, gas, nuc, bio, ps, es, hyd,
+                      Tv, Gv, Nv, Bv, Pv, Ev, Hv, Sv):
+    """MATLAB 1229-1240 plotDeviceData：21 列设备×分区×小时，发电正/充电抽水负。
+    光热/友好电站×4/省间互济/既定跨区：未建模或开关关闭 → 0 列（债，待对应模块接入）。"""
+    Z = lambda *shape: np.zeros(shape)                      # 未建模电源列 = 0
+    def A(n, area):                                         # 分区归属矩阵 (Narea,n)，同 solve 残差自检
+        M = Z(inp.Narea, n); M[area, np.arange(n)] = 1
+        return M
     A_line = Z(inp.Narea, inp.N_line)
     A_line[inp.line_from, np.arange(inp.N_line)] = -1
     A_line[inp.line_to, np.arange(inp.N_line)] = 1
     P = lambda mv: np.asarray(mv.X)
     return np.stack([                                     # cat(3,...) 同序
-        A_th @ P(Tv.P_th), Z(inp.Narea, inp.T), Z(inp.Narea, inp.T),   # 煤电/气电/生物质
-        Z(inp.Narea, inp.T), Z(inp.Narea, inp.T),                       # 径流/库容水电
-        Z(inp.Narea, inp.T), P(Sv.P_wind), P(Sv.P_pv), Z(inp.Narea, inp.T),  # 核电/风/光/光热
-        Z(inp.Narea, inp.T), Z(inp.Narea, inp.T), Z(inp.Narea, inp.T),  # 友好电站风/光/放电
-        Z(inp.Narea, inp.T), Z(inp.Narea, inp.T),                       # 抽蓄发电/电储能放电
-        Z(inp.Narea, inp.T), Z(inp.Narea, inp.T), Z(inp.Narea, inp.T),   # 抽蓄抽水/电储能充/友好充
-        A_line @ P(Sv.P_line), Z(inp.Narea, inp.T),                     # 省内净交换/省间互济
-        Z(inp.Narea, inp.T), P(Sv.P_shed)], axis=2)                     # 跨区/失负荷
+        A(coal.N_th, coal.area_th) @ P(Tv.P_th),             # 煤电
+        A(gas.N_gas, gas.area_gas) @ P(Gv.P_gas),            # 气电
+        A(bio.N_bio, bio.area_bio) @ P(Bv.P_bio),            # 生物质
+        A(hyd.N_hyd_ror, hyd.area_hyd_ror) @ P(Hv.P_hyd_ror),  # 径流式水电
+        A(hyd.N_hyd_res, hyd.area_hyd_res) @ P(Hv.P_hyd_res),  # 库容式水电
+        A(nuc.N_nuc, nuc.area_nuc) @ P(Nv.P_nuc),            # 核电
+        P(Sv.P_wind), P(Sv.P_pv), Z(inp.Narea, inp.T),       # 风电/光伏/光热(未建模)
+        Z(inp.Narea, inp.T), Z(inp.Narea, inp.T), Z(inp.Narea, inp.T),  # 友好电站风/光/放电(未建模)
+        A(ps.N_ps, ps.area_ps) @ P(Pv.P_ps_gen),             # 抽蓄发电
+        A(es.N_es, es.area_es) @ P(Ev.P_es_discharge),       # 电储能放电
+        -A(ps.N_ps, ps.area_ps) @ P(Pv.P_ps_pump),           # 抽蓄抽水（负半轴）
+        -A(es.N_es, es.area_es) @ P(Ev.P_es_charge),         # 电储能充电（负半轴）
+        Z(inp.Narea, inp.T),                                 # 友好电站充电(未建模)
+        A_line @ P(Sv.P_line), Z(inp.Narea, inp.T),          # 省内净交换/省间互济(开关关)
+        Z(inp.Narea, inp.T), P(Sv.P_shed)], axis=2)          # 既定跨区(开关关)/失负荷
 
 
-def plot_operation(inp, coal, Tv, Sv, save_png=False):
+def plot_operation(inp, coal, gas, nuc, bio, ps, es, hyd,
+                   Tv, Gv, Nv, Bv, Pv, Ev, Hv, Sv, save_png=False):
     """MATLAB 1233-1292：全系统（+多省时省级，+各分区）设备运行堆叠图。
     煤电单测 Nprovince=1 → 只有"全系统 + 5 个分区"共 6 张图。"""
     # MATLAB 1190-1193：默认展示前 168 小时
     plotRows = np.arange(0, min(168, inp.T))
     plotTime = inp.Time[plotRows]
-    device = build_device_data(inp, coal, Tv, Sv)
+    device = build_device_data(inp, coal, gas, nuc, bio, ps, es, hyd,
+                               Tv, Gv, Nv, Bv, Pv, Ev, Hv, Sv)
     P_D = inp.P_load - np.asarray(Sv.P_shift_out.X) + np.asarray(Sv.P_shift_in.X) \
         - np.asarray(Sv.P_cut.X)                            # MATLAB 1240 plotNetLoad
+    # 自检：21 列逐点合计 ≈ 响应后负荷（与 solve 残差同一恒等式），漏列立刻报警
+    assert np.abs(device.sum(axis=2) - P_D).max() < 1e-3, "21 列合计≠响应后负荷：有设备列漏画"
 
     # MATLAB 1233-1239：作用域 = 全系统 (+省) + 各分区
     scopes = [("全系统", np.ones((1, inp.Narea)))]
@@ -141,10 +155,11 @@ def main(T: int = 24, save_png: bool = False):
     plt.rcParams["axes.unicode_minus"] = False
     config.T = T
     inp = reader.load_inputs()
-    m, coal, _gas, _nuc, _bio, Tv, _Gv, _Nv, _Bv, Sv = S.solve(inp)
+    m, coal, gas, nuc, bio, ps, es, hyd, Tv, Gv, Nv, Bv, Pv, Ev, Hv, Sv = S.solve(inp)
     if m.SolCount == 0:
         print("无可行解，不出图"); return
-    plot_operation(inp, coal, Tv, Sv, save_png=save_png)
+    plot_operation(inp, coal, gas, nuc, bio, ps, es, hyd,
+                   Tv, Gv, Nv, Bv, Pv, Ev, Hv, Sv, save_png=save_png)
 
 
 if __name__ == "__main__":
