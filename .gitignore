@@ -1,0 +1,9 @@
+*.log
+*.mat
+.claude/
+CLAUDE.md
+.vscode/
+__pycache__/
+.ipynb_checkpoints/
+*.png
+results/

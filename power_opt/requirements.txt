@@ -1,0 +1,4 @@
+gurobipy
+pandas
+openpyxl
+scipy
