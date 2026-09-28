@@ -2,3 +2,4 @@ gurobipy
 pandas
 openpyxl
 scipy
+pyarrow

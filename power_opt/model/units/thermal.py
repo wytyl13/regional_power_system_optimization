@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 from dataclasses import dataclass
 import gurobipy as gp
 
@@ -24,6 +25,7 @@ class CoalInputs:
     N_th: int
     UnitKey_th: list
     area_th: np.ndarray            # 机组 → 分区（0 基）
+    P_th_rated: np.ndarray         # 额定容量，仅固定运维基数（MATLAB 81）
     P_th_max: np.ndarray; P_th_min: np.ndarray
     m_th: np.ndarray               # 检修：1 检修，0 可用（N_th×T）
     c_th_FOM: np.ndarray           # 本周期元/MW
@@ -46,7 +48,7 @@ def load_coal(inp: Inputs) -> CoalInputs:
     mtn_coal = inp.maintenance[inp.maintenance["Type"].astype(str) == "煤电"]
 
     # ---- 1.3 煤电表（MATLAB 87-123）----
-    req_th = ["UnitKey", "SUBSTR(C.ID，12)", "CAP", "MIN_POWER_GEN", "INIT_STATUS",
+    req_th = ["UnitKey", "SUBSTR(C.ID，12)", "CAP", "DERATE_RATE", "MIN_POWER_GEN", "INIT_STATUS",
               "COST_START_UP", "COST_SHUT_DOWN", "COST_A", "COST_B", "COST_C",
               "MIN_UP_TIME", "MIN_DOWN_TIME", "INIT_HOURS", "INIT_POWER",
               "RAMP_LIMIT_UP", "RAMP_LIMIT_DOWN", "START_RAMP", "STOP_RAMP",
@@ -60,7 +62,9 @@ def load_coal(inp: Inputs) -> CoalInputs:
     area_th = np.array([areaPos[z] for z in zone_th])
     f = lambda c: thData[c].to_numpy(float)
     UnitKey_th = thData["UnitKey"].astype(str).tolist()
-    P_th_max = f("CAP"); P_th_min = f("MIN_POWER_GEN")
+    # MATLAB 81-82：额定容量只作固定运维基数；出力上限=额定×(1-受阻率)
+    P_th_rated = f("CAP")
+    P_th_max = P_th_rated * (1.0 - f("DERATE_RATE")); P_th_min = f("MIN_POWER_GEN")
     u_th_0 = f("INIT_STATUS")
     c_th_start = inp.costScale * f("COST_START_UP"); c_th_stop = inp.costScale * f("COST_SHUT_DOWN")
     a_th = inp.costScale * f("COST_A"); b_th = inp.costScale * f("COST_B"); c_th = inp.costScale * f("COST_C")
@@ -72,12 +76,19 @@ def load_coal(inp: Inputs) -> CoalInputs:
 
     m_th = np.zeros((N_th, T))
     keyPos = {k: i for i, k in enumerate(UnitKey_th)}
+    t_prev = inp.Time[0] - pd.Timedelta(hours=1)   # 起点前 1 小时（MATLAB 114）
     for _, plan in mtn_coal.iterrows():
         key = str(plan["UnitKey"])
         if key not in keyPos:
             raise KeyError(f"检修计划机组 {key} 不在煤电表中（不猜、不忽略）")
         periods = (inp.Time >= plan["StartTime"]) & (inp.Time < plan["EndTime"])
         m_th[keyPos[key], periods] = 1
+        # MATLAB 114-118：起点前 1 小时已在检修窗口 → 初值覆盖为停机，累计已停机小时
+        if plan["StartTime"] <= t_prev < plan["EndTime"]:
+            i = keyPos[key]
+            u_th_0[i] = 0.0
+            P_th_0[i] = 0.0
+            T_th_initial[i] = (inp.Time[0] - plan["StartTime"]).total_seconds() / 3600.0
 
     # ---- 六节点排放（MATLAB 125-135）：每台 6 行，NodeIndex 必须是 0..5 ----
     em = _read(config.SYSTEM_FILE, "煤电碳排节点", ["UnitKey", "NodeIndex", "CO2Rate_t_h"])
@@ -96,13 +107,15 @@ def load_coal(inp: Inputs) -> CoalInputs:
     P_th_node = P_th_min[:, None] + (P_th_max - P_th_min)[:, None] * frac
     F_th_node = a_th[:, None] * P_th_node ** 2 + b_th[:, None] * P_th_node + c_th[:, None]
 
-    for name, arr in [("P_th_max", P_th_max), ("P_th_min", P_th_min), ("m_th", m_th),
+    for name, arr in [("P_th_rated", P_th_rated), ("P_th_max", P_th_max), ("P_th_min", P_th_min),
+                      ("m_th", m_th),
                       ("CO2_th_node", CO2_th_node), ("P_th_node", P_th_node), ("F_th_node", F_th_node)]:
         if not np.all(np.isfinite(arr)):
             raise ValueError(f"{name} 含 NaN/Inf，检查煤电输入表")
 
     return CoalInputs(
         N_th=N_th, UnitKey_th=UnitKey_th, area_th=area_th,
+        P_th_rated=P_th_rated,
         P_th_max=P_th_max, P_th_min=P_th_min, m_th=m_th, c_th_FOM=c_th_FOM,
         u_th_0=u_th_0, c_th_start=c_th_start, c_th_stop=c_th_stop,
         a_th=a_th, b_th=b_th, c_th=c_th, T_th_up=T_th_up, T_th_down=T_th_down,
@@ -272,7 +285,7 @@ if __name__ == "__main__":
     inp = reader.load_inputs()
     coal = load_coal(inp)
     print('输入自检: N_th=%d, m_th sum=%s, FOM常数=%.2f'
-          % (coal.N_th, coal.m_th.sum(), float(np.sum(coal.c_th_FOM * coal.P_th_max))))
+          % (coal.N_th, coal.m_th.sum(), float(np.sum(coal.c_th_FOM * coal.P_th_rated))))  # MATLAB 1020 基数=额定
 
     m = gp.Model()
     Tv = add_vars(m, coal)
@@ -287,5 +300,6 @@ if __name__ == "__main__":
 
     add_constraints(m, coal, Tv)
     m.update()
-    print('煤电约束行数  期望=%d  实际=%d' % (132440, m.NumConstrs))
-    print('煤电非零元: %d（log 全模型 411744，S4 建系统层后总对账）' % m.getAttr('NumNZs'))
+    exp_rows = 32*N*T + 2*N           # 结构化账本：江苏 N=172,T=24→132440、海南 N=12,T=168→64536 均吻合
+    print('煤电约束行数  期望=%d  实际=%d' % (exp_rows, m.NumConstrs))
+    print('煤电非零元: %d（海南 v2 全模型四项以 gurobi_hainan_last.log 为锚）' % m.getAttr('NumNZs'))

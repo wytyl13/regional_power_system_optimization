@@ -180,7 +180,9 @@ if __name__ == "__main__":
     add_constraints(m, es, Ev, inp, T)
     m.update()
     exp_rows = 9 * N * T + 2 * N * (T + 1) + 2 * N   # 9 块 + E 界×2 + 首末×2
-    exp_nz = 24 + 48 + 24 + 48 + 48 + 96 + 50 + 2 + 24 + 72 + 48
+    # 逐块每行元数：Pch/Pdis lb=1、ub=2、互斥=2、递推=4、R_lb=1、R_ub=3、
+    # R_energy=2 → 18/行；江苏 N=1,T=24→484、海南 N=1,T=168→3364 均吻合
+    exp_nz = 18 * N * T + 2 * N * (T + 1) + 2 * N
     print('电储能约束行数  期望=%d  实际=%d' % (exp_rows, m.NumConstrs))
     assert m.NumConstrs == exp_rows, '行数与手推账本不符'
     print('电储能非零元  期望=%d  实际=%d' % (exp_nz, m.getAttr('NumNZs')))

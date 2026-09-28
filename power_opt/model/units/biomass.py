@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 from dataclasses import dataclass
 import gurobipy as gp
 
@@ -27,6 +28,7 @@ class BiomassInputs:
     N_bio: int
     UnitKey_bio: list
     area_bio: np.ndarray           # 机组 → 分区（0 基）
+    P_bio_rated: np.ndarray        # 额定容量，仅固定运维基数（MATLAB 235）
     P_bio_max: np.ndarray; P_bio_min: np.ndarray
     m_bio: np.ndarray              # 检修：1 检修，0 可用（N_bio×T）
     c_bio_FOM: np.ndarray          # 本周期元/MW
@@ -43,7 +45,7 @@ def load_biomass(inp: Inputs) -> BiomassInputs:
     T = inp.T
     mtn_bio = inp.maintenance[inp.maintenance["Type"].astype(str) == "生物质"]
 
-    req_bio = ["UnitKey", "SUBSTR(C.ID，12)", "CAP", "MIN_POWER_GEN", "GEN_COST",
+    req_bio = ["UnitKey", "SUBSTR(C.ID，12)", "CAP", "DERATE_RATE", "MIN_POWER_GEN", "GEN_COST",
                "INIT_POWER", "RAMP_LIMIT_UP", "RAMP_LIMIT_DOWN", "START_RAMP",
                "STOP_RAMP", "INIT_MAINTENANCE", "FOM_COST_PERIOD", "ENERGY_LIMIT_MWH"]
     bioData = _read(config.UNIT_FILE, "生物质", req_bio)
@@ -55,7 +57,9 @@ def load_biomass(inp: Inputs) -> BiomassInputs:
     area_bio = np.array([areaPos[z] for z in zone_bio])
     f = lambda c: bioData[c].to_numpy(float)
     UnitKey_bio = bioData["UnitKey"].astype(str).tolist()
-    P_bio_max = f("CAP"); P_bio_min = f("MIN_POWER_GEN")
+    # MATLAB 235-236：额定容量只作固定运维基数；出力上限=额定×(1-受阻率)
+    P_bio_rated = f("CAP")
+    P_bio_max = P_bio_rated * (1.0 - f("DERATE_RATE")); P_bio_min = f("MIN_POWER_GEN")
     c_bio_gen = inp.costScale * f("GEN_COST")
     P_bio_0 = f("INIT_POWER"); RU_bio = f("RAMP_LIMIT_UP"); RD_bio = f("RAMP_LIMIT_DOWN")
     SU_bio = f("START_RAMP"); SD_bio = f("STOP_RAMP")
@@ -65,19 +69,25 @@ def load_biomass(inp: Inputs) -> BiomassInputs:
 
     m_bio = np.zeros((N_bio, T))
     keyPos = {k: i for i, k in enumerate(UnitKey_bio)}
+    t_prev = inp.Time[0] - pd.Timedelta(hours=1)   # 起点前 1 小时（MATLAB 258）
     for _, plan in mtn_bio.iterrows():
         key = str(plan["UnitKey"])
         if key not in keyPos:
             raise KeyError(f"检修计划机组 {key} 不在生物质表中（不猜、不忽略）")
         periods = (inp.Time >= plan["StartTime"]) & (inp.Time < plan["EndTime"])
         m_bio[keyPos[key], periods] = 1
+        # MATLAB 258-261：起点前 1 小时已在检修窗口 → 初值覆盖为检修态、功率 0
+        if plan["StartTime"] <= t_prev < plan["EndTime"]:
+            m_bio_0[keyPos[key]] = 1.0
+            P_bio_0[keyPos[key]] = 0.0
 
-    for name, arr in [("P_bio_max", P_bio_max), ("P_bio_min", P_bio_min), ("m_bio", m_bio)]:
+    for name, arr in [("P_bio_rated", P_bio_rated), ("P_bio_max", P_bio_max), ("P_bio_min", P_bio_min), ("m_bio", m_bio)]:
         if not np.all(np.isfinite(arr)):
             raise ValueError(f"{name} 含 NaN/Inf，检查生物质输入表")
 
     return BiomassInputs(
         N_bio=N_bio, UnitKey_bio=UnitKey_bio, area_bio=area_bio,
+        P_bio_rated=P_bio_rated,
         P_bio_max=P_bio_max, P_bio_min=P_bio_min, m_bio=m_bio, c_bio_FOM=c_bio_FOM,
         c_bio_gen=c_bio_gen, P_bio_0=P_bio_0, RU_bio=RU_bio, RD_bio=RD_bio,
         SU_bio=SU_bio, SD_bio=SD_bio, m_bio_0=m_bio_0, E_bio_limit=E_bio_limit,
@@ -149,7 +159,7 @@ if __name__ == "__main__":
     inp = reader.load_inputs()
     bio = load_biomass(inp)
     print('输入自检: N_bio=%d, m_bio sum=%s, FOM常数=%.2f'
-          % (bio.N_bio, bio.m_bio.sum(), float(np.sum(bio.c_bio_FOM * bio.P_bio_max))))
+          % (bio.N_bio, bio.m_bio.sum(), float(np.sum(bio.c_bio_FOM * bio.P_bio_rated))))  # MATLAB 1037 基数=额定
 
     m = gp.Model()
     Bv = add_vars(m, bio)

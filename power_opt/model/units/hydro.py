@@ -6,7 +6,8 @@
 @File    : hydro.py
 径流式+库容式水电模块：一比一对照 MATLAB 1.17 / 2.4 / 3.4 / 4.4。
 机组行来自分区机组信息表[径流式水电/库容式水电]（AreaID 分区列，非 SUBSTR）；
-时序与调节周期来自算例系统参数[水电时序/水电调节周期]（跨文件，注意副本要成对换）。
+月参数来自算例系统参数[水电月参数]（海南 v2：按水文情景筛行、月值展开为小时，
+每台库容水电 × 每个覆盖月份 = 一个调节周期；替代 v1 的水电时序/调节周期两表）。
 守卫纪律（坑 4 镜像）：3.4 节 if N_hyd_ror>0 / if N_hyd_res>0 逐行照抄不增不删。
 E_hyd_curt 变量无条件建、无条件进目标（第 1 轮坑 2 的根源：空机组表+周期有行
 = 无界），靠数据副本保证不发生，本模块不自行兜底。
@@ -15,12 +16,11 @@ E_hyd_curt 变量无条件建、无条件进目标（第 1 轮坑 2 的根源：
 from __future__ import annotations
 
 import numpy as np
-import pandas as pd
 from dataclasses import dataclass, field
 import gurobipy as gp
 
 import config
-from reader import _read, _zstr, _to_hours, Inputs
+from reader import _read, _zstr, Inputs
 
 
 @dataclass
@@ -40,7 +40,7 @@ class HydInputs:
 
 
 def load_hyd(inp: Inputs) -> HydInputs:
-    """镜像 MATLAB 1.17 节（402-445）。缺列缺值即报错，不补 0。"""
+    """镜像 MATLAB 1.17 节（海南 v2，402-451）。缺列缺值即报错，不补 0。"""
     req_hyd = ["UnitKey", "AreaID", "CAP", "FOM_COST_PERIOD"]
     rorData = _read(config.UNIT_FILE, "径流式水电", req_hyd)
     resData = _read(config.UNIT_FILE, "库容式水电", req_hyd)
@@ -57,47 +57,54 @@ def load_hyd(inp: Inputs) -> HydInputs:
     UnitKey_ror = rorData["UnitKey"].astype(str).tolist()
     UnitKey_res = resData["UnitKey"].astype(str).tolist()
 
-    # ---- 时序（MATLAB 410、419-434）：每台机按 UnitKey 领行，缺时刻即报错 ----
-    hydTimeData = _read(config.SYSTEM_FILE, "水电时序",
-                        ["UnitKey", "Time", "ForcedMW", "ExpectedMW"])
+    # ---- 水电月参数（MATLAB 417-435）：按水文情景筛行，月值扩展为本次小时序列 ----
+    hydMonthData = _read(config.SYSTEM_FILE, "水电月参数",
+                         ["UnitKey", "Hydrology", "Month", "ForcedMW", "ExpectedMW", "AverageMW"])
+    hydMonthData = hydMonthData[hydMonthData["Hydrology"].astype(str)
+                                == config.HYDROLOGY_SCENARIO]                # MATLAB 419
+    if hydMonthData.empty:
+        # MATLAB 419 无守卫：情景名写错会空表静默出错，按数值安全纪律显式报错
+        raise KeyError(f"水电月参数无情景 {config.HYDROLOGY_SCENARIO!r} 的行"
+                       "（检查 config.HYDROLOGY_SCENARIO 与表内 Hydrology 列）")
     T = inp.T
     P_ror_min = np.zeros((N_ror, T)); P_ror_exp = np.zeros((N_ror, T))
     P_res_min = np.zeros((N_res, T)); P_res_exp = np.zeros((N_res, T))
     for keys, mins, exps in ((UnitKey_ror, P_ror_min, P_ror_exp),
                              (UnitKey_res, P_res_min, P_res_exp)):
         for i, key in enumerate(keys):
-            rows = hydTimeData[hydTimeData["UnitKey"].astype(str) == key]
-            rows = rows.set_index(_to_hours(rows["Time"]))
+            rows = hydMonthData[hydMonthData["UnitKey"].astype(str) == key]
+            if rows.empty:
+                raise KeyError(f"水电月参数缺机组 {key} 的行（不补值）")
+            mmap = {}                                              # 月 → 行号（重复月即报错）
+            for idx, mo in zip(rows.index, rows["Month"].astype(int)):
+                if mo in mmap:
+                    raise KeyError(f"水电月参数机组 {key} 的 {mo} 月有重复行")
+                mmap[mo] = idx
             try:
-                sel = rows.loc[inp.Time]
+                sel = rows.loc[[mmap[mo] for mo in inp.Time.month]]    # MATLAB 426 ismember
             except KeyError as e:
-                raise KeyError(f"水电时序缺机组 {key} 的时刻 {e}") from None
-            mins[i, :] = sel["ForcedMW"].to_numpy(float)
-            exps[i, :] = sel["ExpectedMW"].to_numpy(float)
+                raise KeyError(f"水电月参数缺机组 {key} 的 {e} 月行") from None
+            mins[i, :] = sel["ForcedMW"].to_numpy(float)             # MATLAB 427/433
+            exps[i, :] = sel["ExpectedMW"].to_numpy(float)           # MATLAB 428/434
 
-    # ---- 调节周期（MATLAB 411、415-418、436-445）：左闭右开，过滤到仿真区间 ----
-    perData = _read(config.SYSTEM_FILE, "水电调节周期",
-                    ["UnitKey", "StartTime", "EndTime", "AverageMW"])
-    per_start = _to_hours(perData["StartTime"])
-    per_end = _to_hours(perData["EndTime"])
-    t0 = inp.Time[0]
-    t1 = inp.Time[-1] + pd.Timedelta(hours=1)                      # MATLAB 436-437
-    keep = (per_end > t0) & (per_start < t1)
-    perData, per_start, per_end = perData[keep], per_start[keep], per_end[keep]
-    N_period = len(perData)
-    resPos = {k: i for i, k in enumerate(UnitKey_res)}
-    try:
-        hydPeriodUnit = np.array([resPos[str(k)] for k in perData["UnitKey"]],
-                                 dtype=int)                        # MATLAB 439
-    except KeyError as e:
-        raise KeyError(f"水电调节周期的机组 {e} 不在库容式水电表中") from None
+    # ---- 调节周期（MATLAB 436-450）：每台库容水电 × 每个覆盖月份一个周期 ----
+    hourMonth = inp.Time.to_period("M")                             # 每小时所属月
+    Month = list(dict.fromkeys(hourMonth))                          # unique stable
+    N_period = N_res * len(Month)                                   # MATLAB 438
+    hydPeriodUnit = np.zeros(N_period, dtype=int)
     hydPeriodHours = []
     E_hyd_available = np.zeros(N_period)
-    for k in range(N_period):                                       # MATLAB 442-445
-        hrs = np.where((inp.Time >= per_start.iloc[k])
-                       & (inp.Time < per_end.iloc[k]))[0].astype(int)
-        hydPeriodHours.append(hrs)
-        E_hyd_available[k] = float(perData["AverageMW"].iloc[k]) * len(hrs) * inp.Delta_t
+    for i, key in enumerate(UnitKey_res):                           # MATLAB 442-450
+        rows = hydMonthData[hydMonthData["UnitKey"].astype(str) == key]
+        avg = dict(zip(rows["Month"].astype(int), rows["AverageMW"].to_numpy(float)))
+        for j, mo in enumerate(Month):
+            k = i * len(Month) + j
+            hydPeriodUnit[k] = i
+            hrs = np.where(hourMonth == mo)[0].astype(int)
+            hydPeriodHours.append(hrs)
+            if mo.month not in avg:
+                raise KeyError(f"水电月参数缺机组 {key} 的 {mo.month} 月 AverageMW 行")
+            E_hyd_available[k] = avg[mo.month] * len(hrs) * inp.Delta_t
 
     for name, arr in [("P_hyd_ror_min", P_ror_min), ("P_hyd_ror_expected", P_ror_exp),
                       ("P_hyd_res_min", P_res_min), ("P_hyd_res_expected", P_res_exp),
@@ -183,10 +190,12 @@ if __name__ == "__main__":
                          + np.sum(hyd.FOM_res * hyd.CAP_res)))      # MATLAB 1036-1037
     print('输入自检: N_ror=%d, N_res=%d, N_period=%d' %
           (hyd.N_hyd_ror, hyd.N_hyd_res, hyd.N_hyd_period))
-    print('  ror: min[0]=%s expected[0]=%s' %
-          (hyd.P_hyd_ror_min[0, :2], hyd.P_hyd_ror_expected[0, :2]))
-    print('  res: min[0]=%s expected[0]=%s' %
-          (hyd.P_hyd_res_min[0, :2], hyd.P_hyd_res_expected[0, :2]))
+    if hyd.N_hyd_ror > 0:
+        print('  ror: min[0]=%s expected[0]=%s' %
+              (hyd.P_hyd_ror_min[0, :2], hyd.P_hyd_ror_expected[0, :2]))
+    if hyd.N_hyd_res > 0:
+        print('  res: min[0]=%s expected[0]=%s' %
+              (hyd.P_hyd_res_min[0, :2], hyd.P_hyd_res_expected[0, :2]))
     print('  周期: 机组=%d 小时数=%d E_avail=%.2f MWh' %
           (hyd.hydPeriodUnit[0], len(hyd.hydPeriodHours[0]),
            hyd.E_hyd_available[0]))

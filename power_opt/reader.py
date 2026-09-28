@@ -86,7 +86,8 @@ class Inputs:
     P_line_forward: np.ndarray; P_line_reverse: np.ndarray
     # 省级参数（1.15）
     reserveDuration: np.ndarray; adequacyFactor: np.ndarray
-    coldReserveRatio: np.ndarray; renewableUtilizationMin: np.ndarray
+    coldReserveRatio: np.ndarray; hotReserveRatio: np.ndarray
+    renewableUtilizationMin: np.ndarray
     CO2Limit: np.ndarray
     # 分区负荷参数（1.20）
     ShedMaxRatio: np.ndarray; ShiftWindow_h: np.ndarray
@@ -189,13 +190,15 @@ def load_inputs() -> Inputs:
     if miss := [z for z in fl + tl if z not in areaPos]:
         raise KeyError(f"省内断面分区编号 {set(miss)} 不在分区表中")
     N_line = len(lineData)
-    line_from = np.array([areaPos[z] for z in fl]); line_to = np.array([areaPos[z] for z in tl])
+    # dtype=int：空断面（N_line=0）时 np.array([]) 默认 float，下游花式索引会拒收
+    line_from = np.array([areaPos[z] for z in fl], dtype=int)
+    line_to = np.array([areaPos[z] for z in tl], dtype=int)
     P_line_forward = lineData["ForwardMW"].to_numpy(float)
     P_line_reverse = lineData["ReverseMW"].to_numpy(float)
 
     # ---- 1.15 省级约束（MATLAB 358-369）----
     provData = _read(config.SYSTEM_FILE, "省级约束",
-                     ["ProvinceID", "AdequacyFactor", "ColdReserveRatio",
+                     ["ProvinceID", "AdequacyFactor", "ColdReserveRatio", "HotReserveRatio",
                       "RenewableUtilizationMin", "CO2Limit_t", "ReserveDuration_h"])
     provData = provData[provData["ProvinceID"].astype(str).isin(ProvinceID)]
     provData = provData.set_index("ProvinceID").loc[ProvinceID]        # 与 MATLAB 同序
@@ -203,6 +206,7 @@ def load_inputs() -> Inputs:
         raise KeyError(f"省级约束缺值:\n{provData[provData.isna().any(axis=1)]}")
     adequacyFactor = provData["AdequacyFactor"].to_numpy(float)
     coldReserveRatio = provData["ColdReserveRatio"].to_numpy(float)
+    hotReserveRatio = provData["HotReserveRatio"].to_numpy(float)      # MATLAB 381
     renewableUtilizationMin = provData["RenewableUtilizationMin"].to_numpy(float)
     CO2Limit = provData["CO2Limit_t"].to_numpy(float)
     reserveDuration = provData["ReserveDuration_h"].to_numpy(float)
@@ -295,7 +299,8 @@ def load_inputs() -> Inputs:
         N_line=N_line, line_from=line_from, line_to=line_to,
         P_line_forward=P_line_forward, P_line_reverse=P_line_reverse,
         reserveDuration=reserveDuration, adequacyFactor=adequacyFactor,
-        coldReserveRatio=coldReserveRatio, renewableUtilizationMin=renewableUtilizationMin,
+        coldReserveRatio=coldReserveRatio, hotReserveRatio=hotReserveRatio,
+        renewableUtilizationMin=renewableUtilizationMin,
         CO2Limit=CO2Limit,
         ShedMaxRatio=ShedMaxRatio, ShiftWindow_h=ShiftWindow_h, ShiftCost=ShiftCost,
         CutCost=CutCost, DRFixedCost=DRFixedCost, AnnualCutEnergy_MWh=AnnualCutEnergy_MWh,

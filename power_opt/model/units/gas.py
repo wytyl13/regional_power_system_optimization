@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 from dataclasses import dataclass
 import gurobipy as gp
 
@@ -27,6 +28,7 @@ class GasInputs:
     N_gas: int
     UnitKey_gas: list
     area_gas: np.ndarray           # 机组 → 分区（0 基）
+    P_gas_rated: np.ndarray        # 额定容量，仅固定运维基数（MATLAB 137）
     P_gas_max: np.ndarray; P_gas_min: np.ndarray
     m_gas: np.ndarray              # 检修：1 检修，0 可用（N_gas×T）
     c_gas_FOM: np.ndarray          # 本周期元/MW
@@ -46,7 +48,7 @@ def load_gas(inp: Inputs) -> GasInputs:
     mtn_gas = inp.maintenance[inp.maintenance["Type"].astype(str) == "气电"]
 
     # ---- 1.4 气电表（MATLAB 138-160）----
-    req_gas = ["UnitKey", "SUBSTR(C.ID，12)", "CAP", "MIN_POWER_GEN", "INIT_STATUS",
+    req_gas = ["UnitKey", "SUBSTR(C.ID，12)", "CAP", "DERATE_RATE", "MIN_POWER_GEN", "INIT_STATUS",
                "COST_START_UP", "COST_SHUT_DOWN", "GEN_COST", "INIT_POWER",
                "RAMP_LIMIT_UP", "RAMP_LIMIT_DOWN", "START_RAMP", "STOP_RAMP",
                "CO2_FACTOR", "MIN_UP_TIME", "MIN_DOWN_TIME", "INIT_HOURS",
@@ -60,7 +62,9 @@ def load_gas(inp: Inputs) -> GasInputs:
     area_gas = np.array([areaPos[z] for z in zone_gas])
     f = lambda c: gasData[c].to_numpy(float)
     UnitKey_gas = gasData["UnitKey"].astype(str).tolist()
-    P_gas_max = f("CAP"); P_gas_min = f("MIN_POWER_GEN")
+    # MATLAB 137-138：额定容量只作固定运维基数；出力上限=额定×(1-受阻率)
+    P_gas_rated = f("CAP")
+    P_gas_max = P_gas_rated * (1.0 - f("DERATE_RATE")); P_gas_min = f("MIN_POWER_GEN")
     u_gas_0 = f("INIT_STATUS")
     c_gas_start = inp.costScale * f("COST_START_UP"); c_gas_stop = inp.costScale * f("COST_SHUT_DOWN")
     c_gas_gen = inp.costScale * f("GEN_COST")
@@ -72,20 +76,29 @@ def load_gas(inp: Inputs) -> GasInputs:
 
     m_gas = np.zeros((N_gas, T))
     keyPos = {k: i for i, k in enumerate(UnitKey_gas)}
+    t_prev = inp.Time[0] - pd.Timedelta(hours=1)   # 起点前 1 小时（MATLAB 163）
     for _, plan in mtn_gas.iterrows():
         key = str(plan["UnitKey"])
         if key not in keyPos:
             raise KeyError(f"检修计划机组 {key} 不在气电表中（不猜、不忽略）")
         periods = (inp.Time >= plan["StartTime"]) & (inp.Time < plan["EndTime"])
         m_gas[keyPos[key], periods] = 1
+        # MATLAB 163-167：起点前 1 小时已在检修窗口 → 初值覆盖为停机，累计已停机小时
+        # （T_gas_initial 先读 INIT_HOURS（157 行），在此被覆盖）
+        if plan["StartTime"] <= t_prev < plan["EndTime"]:
+            i = keyPos[key]
+            u_gas_0[i] = 0.0
+            P_gas_0[i] = 0.0
+            T_gas_initial[i] = (inp.Time[0] - plan["StartTime"]).total_seconds() / 3600.0
 
-    for name, arr in [("P_gas_max", P_gas_max), ("P_gas_min", P_gas_min), ("m_gas", m_gas),
+    for name, arr in [("P_gas_rated", P_gas_rated), ("P_gas_max", P_gas_max), ("P_gas_min", P_gas_min), ("m_gas", m_gas),
                       ("CO2_gas_factor", CO2_gas_factor)]:
         if not np.all(np.isfinite(arr)):
             raise ValueError(f"{name} 含 NaN/Inf，检查气电输入表")
 
     return GasInputs(
         N_gas=N_gas, UnitKey_gas=UnitKey_gas, area_gas=area_gas,
+        P_gas_rated=P_gas_rated,
         P_gas_max=P_gas_max, P_gas_min=P_gas_min, m_gas=m_gas, c_gas_FOM=c_gas_FOM,
         u_gas_0=u_gas_0, c_gas_start=c_gas_start, c_gas_stop=c_gas_stop,
         c_gas_gen=c_gas_gen, P_gas_0=P_gas_0, RU_gas=RU_gas, RD_gas=RD_gas,
@@ -210,7 +223,7 @@ if __name__ == "__main__":
     inp = reader.load_inputs()
     gas = load_gas(inp)
     print('输入自检: N_gas=%d, m_gas sum=%s, FOM常数=%.2f'
-          % (gas.N_gas, gas.m_gas.sum(), float(np.sum(gas.c_gas_FOM * gas.P_gas_max))))
+          % (gas.N_gas, gas.m_gas.sum(), float(np.sum(gas.c_gas_FOM * gas.P_gas_rated))))  # MATLAB 1031 基数=额定
 
     m = gp.Model()
     Gv = add_vars(m, gas)
@@ -226,9 +239,10 @@ if __name__ == "__main__":
     add_constraints(m, gas, Gv)
     m.update()
     exp_rows = 15*N*T + 2*N           # 15个N×T块 + count初值2N；锁定行0（INIT_HOURS已核）
-    exp_nz = 109740                   # 手推账本（逐块非零元，见轮次文档）
+    exp_nz = 37*N*T - 3*N             # 结构化账本：江苏 N=124,T=24→109740、海南 N=3,T=168→18639 均吻合
+    # （rem>0 触发锁定行时行数会超出公式，MATLAB 同构造；默认起点已核无锁定行）
     print('气电约束行数  期望=%d  实际=%d' % (exp_rows, m.NumConstrs))
     print('气电非零元  期望=%d  实际=%d' % (exp_nz, m.getAttr('NumNZs')))
-    assert m.NumConstrs == exp_rows, '行数与 MATLAB log 减法账(180821-135933=44888)不符'
-    assert m.getAttr('NumNZs') == exp_nz, '非零元与手推账本不符'
+    assert m.NumConstrs == exp_rows, '行数与结构化账本不符'
+    assert m.getAttr('NumNZs') == exp_nz, '非零元与结构化账本不符'
     print('气电约束账本核对通过')

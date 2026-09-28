@@ -193,17 +193,20 @@ if __name__ == "__main__":
     assert m.NumVars == exp_cols and m.NumBinVars == exp_bin, '变量清单与推导不符'
     print('抽蓄变量清单核对通过')
 
-    # 系统层变量占位（844/845 耦合需要 u_ps_area；add_vars 顺带建 840 行互斥 1 条）
+    # 系统层变量占位（844/845 耦合需要 u_ps_area；add_vars 顺带建分区互斥行）
     from model import context as CT
     Sv = CT.add_vars(m, inp)
     add_constraints(m, ps, Pv, inp, Sv)
     m.update()
     exp_rows = 13 * N * T + 2 * N * (T + 1) + 2 * N   # 13 块 + E 界×2 + 首末×2
-    actual_rows = m.NumConstrs - 120                  # 减系统层 u_ps_area_mu 120 行
+    sys_mu_rows = inp.Narea * T                       # u_ps_area_mu（Narea×T 行）
+    actual_rows = m.NumConstrs - sys_mu_rows
     print('抽蓄约束行数  期望=%d  实际=%d' % (exp_rows, actual_rows))
     assert actual_rows == exp_rows, '行数与手推账本不符'
-    exp_nz = 600 + 7 * 1200 + 2400 + 1250 + 50 + 600 + 1800 + 1200
-    actual_nz = m.getAttr('NumNZs') - 240             # 减 u_ps_area_mu 的 240 元
+    # 逐块每行元数：837a=1、837b/838/839/840=2、841×2=1、844/845=2（对系统层二值）、
+    # 847=4、856=1、857=3、858=2 → 25/行；江苏 N=25,T=24→16300、海南 N=1,T=168→4540 均吻合
+    exp_nz = 25 * N * T + 2 * N * (T + 1) + 2 * N
+    actual_nz = m.getAttr('NumNZs') - 2 * sys_mu_rows  # 减 u_ps_area_mu 的 2 元/行
     print('抽蓄非零元  期望=%d  实际=%d' % (exp_nz, actual_nz))
     assert actual_nz == exp_nz, '非零元与手推账本不符'
     print('抽蓄约束账本核对通过')

@@ -10,20 +10,24 @@
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parent
-MATLAB_DIR = PROJECT_DIR.parent / "1、优化模型0918"
+MATLAB_DIR = PROJECT_DIR.parent / "海南2030算例"
 
 UNIT_FILE = MATLAB_DIR / "分区机组信息表.xlsx"
 PROFILE_FILE = MATLAB_DIR / "运行数据.xlsx"
-SYSTEM_FILE = MATLAB_DIR / "算例系统参数_已补数.xlsx"
+SYSTEM_FILE = MATLAB_DIR / "算例系统参数.xlsx"
 RESULT_DIR = PROJECT_DIR / "results"
 
 T = 168
-START_TIME = "2023-01-01 00:00"
+START_TIME = "2030-01-01 00:00"
 DELTA_T = 1.0
+HYDROLOGY_SCENARIO = "平水年"  # 水文情景，镜像 MATLAB 41 行；可改"枯水年"
 
-MIGAP = 1e-4
-# MIGAP = 0
-TIME_LIMIT = 24800
+MIGAP = 1e-3
+TIME_LIMIT = 1800
+# 以下三项镜像 MATLAB 1165-1168（优先找可行解、区分不可行/无界）
+MIP_FOCUS = 1
+HEURISTICS = 0.2
+DUAL_REDUCTIONS = 0
 
 # 省间互济开关，测试数据不包含
 USE_INTERPROVINCIAL = False

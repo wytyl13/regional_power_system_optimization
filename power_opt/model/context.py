@@ -33,6 +33,7 @@ class RegisteredUnits:
     pumped_storage: object = None   # pumped_storage.PSVars（储能轮接入）
     electrochemical: object = None  # electrochemical.ESVars
     hydro: object = None            # hydro.HydVars（水电轮接入）
+    friendly: object = None         # friendly.FrVars（友好电站，海南 v2 接入）
 
 
 @dataclass
@@ -77,13 +78,20 @@ def _area_agg(arr_rows: np.ndarray, n_col: int, Narea: int):
                          shape=(Narea, len(arr_rows)))
 
 
+def _amul(A, P):
+    """A @ P 的零维安全版：机组数 0 时空聚合得 0。
+    MATLAB 稀疏 (Narea,0)@(0,T) 自然得 0；gurobipy 的 MVar 矩阵乘在此断言报错，
+    故 N=0 时直接返回标量 0（P_G/P_sto 等求和不受影响）。"""
+    return A @ P if A.shape[1] else 0
+
+
 def _scatter(edges: int, rows: np.ndarray, T: int):
     """边→小时散射矩阵 (edges, T)：边 e 计入其起点小时 rows[e]。"""
     return sp.csr_matrix((np.ones(edges), (np.arange(edges), rows)), shape=(edges, T))
 
 
 def add_constraints(m: gp.Model, inp: Inputs, sysv: SystemVars,
-                    units: RegisteredUnits, coal, gas, nuc, bio, ps, es, hyd) -> None:
+                    units: RegisteredUnits, coal, gas, nuc, bio, ps, es, hyd, fr) -> None:
     Narea, T, Np = inp.Narea, inp.T, inp.Nprovince
     INF = gp.GRB.INFINITY
     # ---- 3.7/3.8：风、光（可用=出力+弃；煤电单测中可用=0 → 全被钉成 0）----
@@ -139,16 +147,20 @@ def add_constraints(m: gp.Model, inp: Inputs, sysv: SystemVars,
     A_es = _area_agg(es.area_es, es.N_es, Narea)                      # 381
     A_hyd_ror = _area_agg(hyd.area_hyd_ror, hyd.N_hyd_ror, Narea)     # MATLAB 408
     A_hyd_res = _area_agg(hyd.area_hyd_res, hyd.N_hyd_res, Narea)     # 409
-    P_G = (A_th @ units.thermal.P_th + A_gas @ units.gas.P_gas
-           + A_nuc @ units.nuclear.P_nuc + A_bio @ units.biomass.P_bio
-           + A_hyd_ror @ units.hydro.P_hyd_ror
-           + A_hyd_res @ units.hydro.P_hyd_res                         # 818/976（P_hyd 展开进 P_G）
-           + sysv.P_wind + sysv.P_pv)                                 # 970-971
+    A_fr = _area_agg(fr.area_fr, fr.N_fr, Narea)                      # MATLAB 480
+    P_G = (_amul(A_th, units.thermal.P_th) + _amul(A_gas, units.gas.P_gas)
+           + _amul(A_nuc, units.nuclear.P_nuc) + _amul(A_bio, units.biomass.P_bio)
+           + _amul(A_hyd_ror, units.hydro.P_hyd_ror)
+           + _amul(A_hyd_res, units.hydro.P_hyd_res)                   # 818/976（P_hyd 展开进 P_G）
+           + sysv.P_wind + sysv.P_pv
+           + _amul(A_fr, units.friendly.P_fr_wind_out
+                   + units.friendly.P_fr_pv_out
+                   + units.friendly.P_fr_discharge))                   # 897/981（P_fr 展开进 P_G）
     # 核/生/水电不进 CO2（992 只有煤、气），MATLAB 同；储能进平衡（P_sto）与热备用（998）
-    P_sto = (A_es @ units.electrochemical.P_es_discharge             # 974：P_es_dis−P_es_ch
-             - A_es @ units.electrochemical.P_es_charge
-             + A_ps @ (units.pumped_storage.P_ps_gen
-                       - units.pumped_storage.P_ps_pump))             # 832/833 先聚合后作差
+    P_sto = (_amul(A_es, units.electrochemical.P_es_discharge)        # 974：P_es_dis−P_es_ch
+             - _amul(A_es, units.electrochemical.P_es_charge)
+             + _amul(A_ps, units.pumped_storage.P_ps_gen
+                      - units.pumped_storage.P_ps_pump))               # 832/833 先聚合后作差
     # 风/光是系统层变量，恒进平衡式（煤电单测中被钉 0，但项必须存在，MATLAB 同）
     P_tr = _line_net(inp, sysv)                                     # 934
     P_D = inp.P_load - sysv.P_shift_out + sysv.P_shift_in - sysv.P_cut   # 972
@@ -158,11 +170,15 @@ def add_constraints(m: gp.Model, inp: Inputs, sysv: SystemVars,
     m.addConstr(sysv.P_shed <= shedCap * P_D, name="shed_cap")      # 974
     m.addConstr(P_G + P_sto + P_tr + sysv.P_shed == P_D, name="balance")   # 976（互济 0、跨区 0）
 
-    # ---- 3.16 新能源利用率（MATLAB 981-985）----
+    # ---- 3.16 新能源利用率（MATLAB 992-995）----
     A_prov = sp.csr_matrix((np.ones(Narea), (inp.areaProvince, np.arange(Narea))),
                            shape=(Np, Narea))
-    curtail = A_prov @ (sysv.P_wind_curt + sysv.P_pv_curt)          # 省级弃电 (Np,T)
-    availab = A_prov @ (inp.P_wind_available + inp.P_pv_available)  # 省级可用 (Np,T)
+    curtail = A_prov @ (sysv.P_wind_curt + sysv.P_pv_curt
+                        + _amul(A_fr, units.friendly.P_fr_wind_curt   # 993：fr 弃风/弃光计入
+                                + units.friendly.P_fr_pv_curt))       # 省级弃电 (Np,T)
+    availab = A_prov @ (inp.P_wind_available + inp.P_pv_available
+                        + _amul(A_fr, fr.P_fr_wind_available          # 992：fr 可用计入
+                                + fr.P_fr_pv_available))              # 省级可用 (Np,T)
     minU = np.repeat(inp.renewableUtilizationMin[:, None], T, axis=1)
     m.addConstr(curtail.sum(axis=1) * inp.Delta_t
                 <= (1 - minU[:, 0]) * availab.sum(axis=1) * inp.Delta_t,
@@ -170,32 +186,35 @@ def add_constraints(m: gp.Model, inp: Inputs, sysv: SystemVars,
 
     # ---- 3.17 CO2 省级上限（MATLAB 989-992）----
     CO2_gas = np.repeat(gas.CO2_gas_factor[:, None], T, axis=1) * units.gas.P_gas  # 991 t/h，因子×P 表达式
-    CO2_prov = (A_prov @ (A_th @ units.thermal.CO2_th
-                          + A_gas @ CO2_gas)).sum(axis=1) * inp.Delta_t              # 992
+    CO2_prov = (A_prov @ (_amul(A_th, units.thermal.CO2_th)
+                          + _amul(A_gas, CO2_gas))).sum(axis=1) * inp.Delta_t        # 992
     m.addConstr(CO2_prov <= inp.CO2Limit, name="co2_cap")           # 993（Np 行）
 
     # ---- 3.18 周备用（MATLAB 995-999）----
-    R_hot = A_prov @ (A_th @ units.thermal.R_th_hot
-                      + A_gas @ units.gas.R_gas_hot
-                      + A_hyd_res @ units.hydro.R_hyd_hot            # 1001：库容水电热备
-                      + A_ps @ units.pumped_storage.R_ps_hot
-                      + A_es @ units.electrochemical.R_es_hot)      # 997-998：储进热备
-    R_cold = A_prov @ (A_th @ units.thermal.R_th_cold
-                       + A_gas @ units.gas.R_gas_cold)               # 999：冷备只有煤、气（水电无冷备）
+    R_hot = A_prov @ (_amul(A_th, units.thermal.R_th_hot)
+                      + _amul(A_gas, units.gas.R_gas_hot)
+                      + _amul(A_hyd_res, units.hydro.R_hyd_hot)      # 1001：库容水电热备
+                      + _amul(A_ps, units.pumped_storage.R_ps_hot)
+                      + _amul(A_es, units.electrochemical.R_es_hot))  # 997-998：储进热备
+    R_cold = A_prov @ (_amul(A_th, units.thermal.R_th_cold)
+                       + _amul(A_gas, units.gas.R_gas_cold))         # 999：冷备只有煤、气（水电无冷备）
     pk = np.repeat((inp.adequacyFactor - 1)[:, None], T, axis=1)
     cr = np.repeat(inp.coldReserveRatio[:, None], T, axis=1)
-    m.addConstr(R_hot + R_cold >= pk * inp.P_week_peak, name="reserve_hot")  # 998
-    m.addConstr(R_cold >= cr * inp.P_week_peak, name="reserve_cold")        # 999
+    hr = np.repeat(inp.hotReserveRatio[:, None], T, axis=1)
+    m.addConstr(R_hot + R_cold >= pk * inp.P_week_peak, name="reserve_hot")  # 1009
+    m.addConstr(R_hot >= hr * inp.P_week_peak, name="reserve_hot2")         # 1010：v2 新增第三条
+    m.addConstr(R_cold >= cr * inp.P_week_peak, name="reserve_cold")        # 1011
 
 
 def _line_net(inp: Inputs, sysv: SystemVars):
-    """省内断面净受入 P_tr = A_line·P_line（MATLAB 934；送端-1 受端+1）。"""
+    """省内断面净受入 P_tr = A_line·P_line（MATLAB 934；送端-1 受端+1）。
+    N_line=0 时 A_line 为 (Narea,0)，走 _amul 零维安全（MATLAB 稀疏乘自然为 0）。"""
     Nl, Narea = inp.N_line, inp.Narea
     rows = np.concatenate([inp.line_from, inp.line_to])
     cols = np.concatenate([np.arange(Nl), np.arange(Nl)])
     vals = np.concatenate([-np.ones(Nl), np.ones(Nl)])
     A_line = sp.csr_matrix((vals, (rows, cols)), shape=(Narea, Nl))
-    return A_line @ sysv.P_line
+    return _amul(A_line, sysv.P_line)
 
 
 if __name__ == "__main__":
@@ -210,6 +229,7 @@ if __name__ == "__main__":
     from model.units import pumped_storage as PS
     from model.units import electrochemical as ES
     from model.units import hydro as HY
+    from model.units import friendly as FR
     inp = reader.load_inputs()
     m = gp.Model()
     coal = TH.load_coal(inp)
@@ -219,6 +239,7 @@ if __name__ == "__main__":
     ps = PS.load_ps(inp)
     es = ES.load_es(inp)
     hyd = HY.load_hyd(inp)
+    fr = FR.load_fr(inp)
     Tv = TH.add_vars(m, coal)
     Gv = GA.add_vars(m, gas)
     Nv = NU.add_vars(m, nuc)
@@ -226,9 +247,11 @@ if __name__ == "__main__":
     Pv = PS.add_vars(m, ps)
     Ev = ES.add_vars(m, es, inp.T)
     Hv = HY.add_vars(m, hyd, inp.T)
+    Fv = FR.add_vars(m, fr, inp.T)
     Sv = add_vars(m, inp)
     units = RegisteredUnits(thermal=Tv, gas=Gv, nuclear=Nv, biomass=Bv,
-                            pumped_storage=Pv, electrochemical=Ev, hydro=Hv)
+                            pumped_storage=Pv, electrochemical=Ev, hydro=Hv,
+                            friendly=Fv)
     TH.add_constraints(m, coal, Tv)
     GA.add_constraints(m, gas, Gv)
     NU.add_constraints(m, nuc, Nv)
@@ -236,14 +259,17 @@ if __name__ == "__main__":
     PS.add_constraints(m, ps, Pv, inp, Sv)
     ES.add_constraints(m, es, Ev, inp, inp.T)
     HY.add_constraints(m, hyd, Hv, inp, inp.T)
-    add_constraints(m, inp, Sv, units, coal, gas, nuc, bio, ps, es, hyd)
+    FR.add_constraints(m, fr, Fv, inp, inp.T)
+    add_constraints(m, inp, Sv, units, coal, gas, nuc, bio, ps, es, hyd, fr)
     m.update()
-    exp_sys_rows = m.NumConstrs - 132440 - 44888 - 960 - 1261 - 9100 - 268 - 123
-    print('系统层变量  期望=2204  实际=%d' % (m.NumVars - 87032 - 24056 - 240 - 312 - 3625 - 145 - 73))
-    print('系统层约束行  期望=3493  实际=%d' % exp_sys_rows)
-    print('全模型: 列 %d(期望 117687) 行 %d(期望 192533) 二值 %d(期望 43440)' %
+    # 各模块账本（海南 T=168，见各模块 __main__）：行/列逐模块减出系统层
+    mod_rows = 64536 + 7566 + 3360 + 4711 + 2524 + 1852 + 1014 + 2860   # 煤/气/核/生/抽蓄/电储/水/友好
+    mod_cols = 42360 + 4038 + 840 + 1176 + 1009 + 1009 + 674 + 1849
+    print('系统层变量  期望=2884  实际=%d' % (m.NumVars - mod_cols))
+    print('系统层约束行  期望=4917  实际=%d' % (m.NumConstrs - mod_rows))
+    print('全模型: 列 %d(期望 55839) 行 %d(期望 93340) 二值 %d' %
           (m.NumVars, m.NumConstrs, m.NumBinVars))
-    print('全模型非零元: %d（期望 559464）' % m.getAttr('NumNZs'))
-    assert (m.NumVars, m.NumConstrs, m.NumBinVars, m.getAttr('NumNZs')) \
-        == (117687, 192533, 43440, 559464), '四项与 MATLAB log 不符'
-    print('四项与 MATLAB log（gurobi_202609241109.log）逐位一致')
+    print('全模型非零元: %d（期望 265135）' % m.getAttr('NumNZs'))
+    assert (m.NumVars, m.NumConstrs, m.getAttr('NumNZs')) \
+        == (55839, 93340, 265135), '三项与 MATLAB log 不符'
+    print('三项与 MATLAB log（gurobi_hainan_last.log）逐位一致')

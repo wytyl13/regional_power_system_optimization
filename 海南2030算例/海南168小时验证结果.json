@@ -1,0 +1,21 @@
+{
+  "hours": 168,
+  "startTime": "2030-01-01",
+  "endTime": "2030-01-07 23:00:00",
+  "scenario": "平水年",
+  "problem": 0,
+  "solverInfo": "Successfully solved (GUROBI)",
+  "solverSeconds": 184.1883788,
+  "objectiveYuan": 2.9868679401093733E+8,
+  "balanceErrorMW": 3.5811353882309049E-12,
+  "minimumConstraintResidual": -3.092281986027956E-11,
+  "energyNotServedMWh": 0,
+  "lossOfLoadHours": 0,
+  "maxLoadShortfallMW": 0,
+  "renewableUtilization": 0.81102937485383586,
+  "CO2_t": 158053.30486083025,
+  "hotReserveMarginMW": -9.3223206931725144E-12,
+  "coldReserveMarginMW": 69.727375973879134,
+  "maxStorageClosureErrorMWh": 0,
+  "mipGap": 0.0099362845920030977
+}

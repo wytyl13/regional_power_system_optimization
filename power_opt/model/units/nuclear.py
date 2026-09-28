@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 from dataclasses import dataclass
 import gurobipy as gp
 
@@ -61,12 +62,17 @@ def load_nuclear(inp: Inputs) -> NuclearInputs:
 
     m_nuc = np.zeros((N_nuc, T))
     keyPos = {k: i for i, k in enumerate(UnitKey_nuc)}
+    t_prev = inp.Time[0] - pd.Timedelta(hours=1)   # 起点前 1 小时（MATLAB 225）
     for _, plan in mtn_nuc.iterrows():
         key = str(plan["UnitKey"])
         if key not in keyPos:
             raise KeyError(f"检修计划机组 {key} 不在核电表中（不猜、不忽略）")
         periods = (inp.Time >= plan["StartTime"]) & (inp.Time < plan["EndTime"])
         m_nuc[keyPos[key], periods] = 1
+        # MATLAB 225-228：起点前 1 小时已在检修窗口 → 初值覆盖为检修态、功率 0
+        if plan["StartTime"] <= t_prev < plan["EndTime"]:
+            m_nuc_0[keyPos[key]] = 1.0
+            P_nuc_0[keyPos[key]] = 0.0
 
     for name, arr in [("P_nuc_max", P_nuc_max), ("P_nuc_min", P_nuc_min), ("m_nuc", m_nuc)]:
         if not np.all(np.isfinite(arr)):

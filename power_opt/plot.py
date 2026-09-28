@@ -1,16 +1,18 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-@Time    : 2026/09/22 19:40
+@Time    : 2026/09/28 11:30
 @Author  : weiyutao
 @File    : plot.py
-设备运行图：一比一对照 MATLAB §七（synergy_jiangsu_25.m 1186-1292 行）。
+设备运行图：一比一对照 MATLAB §七（synergy_hainan_30.m 1192-1299 行）。
 MATLAB 行号注释在每段上方；颜色逐行抄 plotColors，布局抄 tiledlayout/legend 参数。
-煤电单测：21 列设备数据里只有煤电、省内净交换非零，其余列全 0（visibleDevices 自动隐藏）。
+海南 v2：友好电站 4 列接真值（风/光列=直送+站内充，放电正、充电负）、
+'失负荷补偿'→'未供电负荷'、分区图加 if Narea>1 守卫（单分区不出分区图）。
 """
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import matplotlib
 matplotlib.use("Agg")                       # 无屏服务器/命令行环境也可出图
 import matplotlib.pyplot as plt
@@ -21,12 +23,12 @@ import solve as S
 from model import context as CT
 from model.units import thermal as TH
 
-# MATLAB 1199-1210 plotDeviceNames（21 列，顺序即堆叠顺序）
+# MATLAB 1203-1206 plotDeviceNames（21 列，顺序即堆叠顺序）
 DEVICE_NAMES = ['煤电', '气电', '生物质', '径流式水电', '库容式水电',
                 '核电', '风电', '光伏', '光热', '友好电站风电', '友好电站光伏', '友好电站放电',
                 '抽蓄发电', '电化学储能放电', '抽蓄抽水', '电化学储能充电', '友好电站充电',
-                '省内净交换', '省间互济', '既定跨区输电', '失负荷补偿']
-# MATLAB 1212-1217 plotColors（RGB 0-1，逐行抄；充电列与放电列同色，靠正负半轴区分）
+                '省内净交换', '省间互济', '既定跨区输电', '未供电负荷']
+# MATLAB 1207-1214 plotColors（RGB 0-1，逐行抄；充电列与放电列同色，靠正负半轴区分）
 DEVICE_COLORS = np.array([
     [0.36, 0.40, 0.46], [0.75, 0.49, 0.32], [0.50, 0.62, 0.32],
     [0.36, 0.72, 0.86], [0.14, 0.48, 0.72], [0.65, 0.51, 0.72],
@@ -37,10 +39,10 @@ DEVICE_COLORS = np.array([
     [0.49, 0.47, 0.65], [0.71, 0.63, 0.48], [0.85, 0.26, 0.30]])
 
 
-def build_device_data(inp, coal, gas, nuc, bio, ps, es, hyd,
-                      Tv, Gv, Nv, Bv, Pv, Ev, Hv, Sv):
-    """MATLAB 1229-1240 plotDeviceData：21 列设备×分区×小时，发电正/充电抽水负。
-    光热/友好电站×4/省间互济/既定跨区：未建模或开关关闭 → 0 列（债，待对应模块接入）。"""
+def build_device_data(inp, coal, gas, nuc, bio, ps, es, hyd, fr,
+                      Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv):
+    """MATLAB 1188-1196 plotDeviceData：21 列设备×分区×小时，发电正/充电抽水负。
+    光热/省间互济/既定跨区：未建模或开关关闭 → 0 列（债，待对应模块接入）。"""
     Z = lambda *shape: np.zeros(shape)                      # 未建模电源列 = 0
     def A(n, area):                                         # 分区归属矩阵 (Narea,n)，同 solve 残差自检
         M = Z(inp.Narea, n); M[area, np.arange(n)] = 1
@@ -57,40 +59,77 @@ def build_device_data(inp, coal, gas, nuc, bio, ps, es, hyd,
         A(hyd.N_hyd_res, hyd.area_hyd_res) @ P(Hv.P_hyd_res),  # 库容式水电
         A(nuc.N_nuc, nuc.area_nuc) @ P(Nv.P_nuc),            # 核电
         P(Sv.P_wind), P(Sv.P_pv), Z(inp.Narea, inp.T),       # 风电/光伏/光热(未建模)
-        Z(inp.Narea, inp.T), Z(inp.Narea, inp.T), Z(inp.Narea, inp.T),  # 友好电站风/光/放电(未建模)
+        A(fr.N_fr, fr.area_fr) @ (P(Fv.P_fr_wind_out)        # 友好电站风电（直送+站内充）
+                                   + P(Fv.P_fr_wind_ch)),
+        A(fr.N_fr, fr.area_fr) @ (P(Fv.P_fr_pv_out)          # 友好电站光伏（直送+站内充）
+                                   + P(Fv.P_fr_pv_ch)),
+        A(fr.N_fr, fr.area_fr) @ P(Fv.P_fr_discharge),       # 友好电站放电
         A(ps.N_ps, ps.area_ps) @ P(Pv.P_ps_gen),             # 抽蓄发电
         A(es.N_es, es.area_es) @ P(Ev.P_es_discharge),       # 电储能放电
         -A(ps.N_ps, ps.area_ps) @ P(Pv.P_ps_pump),           # 抽蓄抽水（负半轴）
         -A(es.N_es, es.area_es) @ P(Ev.P_es_charge),         # 电储能充电（负半轴）
-        Z(inp.Narea, inp.T),                                 # 友好电站充电(未建模)
+        -A(fr.N_fr, fr.area_fr) @ P(Fv.P_fr_charge),         # 友好电站充电（负半轴）
         A_line @ P(Sv.P_line), Z(inp.Narea, inp.T),          # 省内净交换/省间互济(开关关)
-        Z(inp.Narea, inp.T), P(Sv.P_shed)], axis=2)          # 既定跨区(开关关)/失负荷
+        Z(inp.Narea, inp.T), P(Sv.P_shed)], axis=2)          # 既定跨区(开关关)/未供电负荷
 
 
-def plot_operation(inp, coal, gas, nuc, bio, ps, es, hyd,
-                   Tv, Gv, Nv, Bv, Pv, Ev, Hv, Sv, save_png=False):
-    """MATLAB 1233-1292：全系统（+多省时省级，+各分区）设备运行堆叠图。
-    煤电单测 Nprovince=1 → 只有"全系统 + 5 个分区"共 6 张图。"""
-    # MATLAB 1190-1193：默认展示前 168 小时
-    plotRows = np.arange(0, min(168, inp.T))
-    plotTime = inp.Time[plotRows]
-    device = build_device_data(inp, coal, gas, nuc, bio, ps, es, hyd,
-                               Tv, Gv, Nv, Bv, Pv, Ev, Hv, Sv)
-    P_D = inp.P_load - np.asarray(Sv.P_shift_out.X) + np.asarray(Sv.P_shift_in.X) \
-        - np.asarray(Sv.P_cut.X)                            # MATLAB 1240 plotNetLoad
-    # 自检：21 列逐点合计 ≈ 响应后负荷（与 solve 残差同一恒等式），漏列立刻报警
-    assert np.abs(device.sum(axis=2) - P_D).max() < 1e-3, "21 列合计≠响应后负荷：有设备列漏画"
-
-    # MATLAB 1233-1239：作用域 = 全系统 (+省) + 各分区
+def _scopes(inp):
+    """MATLAB 1217-1224：作用域列表 [(名称, 1×Narea 汇总矩阵)]。
+    全系统 (+多省时省级汇总) + (Narea>1 时各分区)；海南单分区 → 只有全系统。"""
     scopes = [("全系统", np.ones((1, inp.Narea)))]
     if inp.Nprovince > 1:
         A_prov = np.zeros((inp.Nprovince, inp.Narea))
         A_prov[inp.areaProvince, np.arange(inp.Narea)] = 1
         scopes += [(f"{p}省级汇总", A_prov[i:i + 1]) for i, p in enumerate(inp.ProvinceID)]
-    scopes += [(f"{name}分区", np.eye(inp.Narea)[i:i + 1])
-               for i, name in enumerate(inp.AreaName)]
+    if inp.Narea > 1:                                          # 1223：单分区不出分区图
+        scopes += [(f"{name}分区", np.eye(inp.Narea)[i:i + 1])
+                   for i, name in enumerate(inp.AreaName)]
+    return scopes
 
-    for g, (scopeName, M) in enumerate(scopes):
+
+def write_chart_csv(inp, coal, gas, nuc, bio, ps, es, hyd, fr,
+                    Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv, path=None):
+    """绘图曲线 CSV（前端复现 设备运行_*.png 用）：Time + 21 设备列 + 2 条负荷线。
+    列名即 PNG 图例文字；充电/抽水/净送出列已是负值，前端正半轴堆正、负半轴堆负即可。
+    全 T 行（PNG 只画前 168 小时，前端自行截取）；utf-8-sig 让中文列名 Excel 直开；
+    全精度不四舍五入（同其他结果件纪律）。全 0 列（如海南的光热/省间互济）照常输出，
+    前端按 PNG 的 visibleDevices 逻辑隐藏即可。"""
+    device = build_device_data(inp, coal, gas, nuc, bio, ps, es, hyd, fr,
+                               Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv)
+    P_D = inp.P_load - np.asarray(Sv.P_shift_out.X) + np.asarray(Sv.P_shift_in.X) \
+        - np.asarray(Sv.P_cut.X)                            # MATLAB 1240 plotNetLoad
+    # 与 plot_operation 同款自检：21 列逐点合计 ≈ 响应后负荷，漏列立刻报警
+    assert np.abs(device.sum(axis=2) - P_D).max() < 1e-3, "21 列合计≠响应后负荷：有设备列漏画"
+    scopes = _scopes(inp)
+    sfx = lambda name: f"{name}_{scopeName}" if len(scopes) > 1 else name
+    cols = {"Time": [ts.strftime("%Y-%m-%d %H:%M") for ts in inp.Time]}
+    for scopeName, M in scopes:                # 每个作用域一组列（海南仅"全系统"一组，列名不带后缀）
+        for k, name in enumerate(DEVICE_NAMES):
+            cols[sfx(name)] = (M @ device[:, :, k]).ravel()
+        cols[sfx("响应后负荷")] = (M @ P_D).ravel()
+        cols[sfx("原始负荷")] = (M @ inp.P_load).ravel()
+    if path is None:
+        path = config.RESULT_DIR / f"设备运行数据_T{inp.T}.csv"
+    pd.DataFrame(cols).to_csv(path, index=False, encoding="utf-8-sig")
+    print("已导出:", path)
+
+
+def plot_operation(inp, coal, gas, nuc, bio, ps, es, hyd, fr,
+                   Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv, save_png=False):
+    """MATLAB 1217-1299：全系统（+多省时省级，+Narea>1 时各分区）设备运行堆叠图。
+    海南单分区 → 只有"全系统"1 张图。"""
+    # MATLAB 1195-1196：默认展示前 168 小时
+    plotRows = np.arange(0, min(168, inp.T))
+    plotTime = inp.Time[plotRows]
+    device = build_device_data(inp, coal, gas, nuc, bio, ps, es, hyd, fr,
+                               Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv)
+    P_D = inp.P_load - np.asarray(Sv.P_shift_out.X) + np.asarray(Sv.P_shift_in.X) \
+        - np.asarray(Sv.P_cut.X)                            # MATLAB 1240 plotNetLoad
+    # 自检：21 列逐点合计 ≈ 响应后负荷（与 solve 残差同一恒等式），漏列立刻报警
+    assert np.abs(device.sum(axis=2) - P_D).max() < 1e-3, "21 列合计≠响应后负荷：有设备列漏画"
+
+    # MATLAB 1217-1224：作用域列表（见 _scopes，write_chart_csv 与此处共用一份口径）
+    for g, (scopeName, M) in enumerate(_scopes(inp)):
         bars = np.einsum("ar,rtc->tc", M, device[ :, plotRows, :])   # scope×device 汇总
         bars[np.abs(bars) < 1e-6] = 0                          # 1226 浮点噪声置 0
         visible = np.any(np.abs(bars) > 0, axis=0)             # 1227 visibleDevices
@@ -150,16 +189,16 @@ def plot_operation(inp, coal, gas, nuc, bio, ps, es, hyd,
 
 
 def main(T: int = 24, save_png: bool = False):
-    """跑求解 → 出图。save_png=True 时存 results/设备运行_全系统.png 等 6 张。"""
-    plt.rcParams["font.family"] = ["Microsoft YaHei"]            # MATLAB 1257 FontName
+    """跑求解 → 出图。save_png=True 时存 results/设备运行_全系统.png（海南单分区 1 张）。"""
+    plt.rcParams["font.family"] = ["Microsoft YaHei"]            # MATLAB 1268 FontName
     plt.rcParams["axes.unicode_minus"] = False
     config.T = T
     inp = reader.load_inputs()
-    m, coal, gas, nuc, bio, ps, es, hyd, Tv, Gv, Nv, Bv, Pv, Ev, Hv, Sv = S.solve(inp)
+    m, coal, gas, nuc, bio, ps, es, hyd, fr, Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv = S.solve(inp)
     if m.SolCount == 0:
         print("无可行解，不出图"); return
-    plot_operation(inp, coal, gas, nuc, bio, ps, es, hyd,
-                   Tv, Gv, Nv, Bv, Pv, Ev, Hv, Sv, save_png=save_png)
+    plot_operation(inp, coal, gas, nuc, bio, ps, es, hyd, fr,
+                   Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv, save_png=save_png)
 
 
 if __name__ == "__main__":
