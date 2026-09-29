@@ -30,6 +30,7 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from convert import _included, convert
@@ -48,6 +49,12 @@ from solve import solve as po_solve
 import gurobipy as gp
 
 app = FastAPI(title="区域电力系统优化")
+app.add_middleware(   # 跨域放行（开发期全放；上线改 allow_origins 为前端域名列表）
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 DATASETS: dict[str, dict] = {}      # datasetId → {path, parsed, area, year, uploadedAt}
 JOBS: dict[str, dict] = {}          # jobId → 状态（内存注册表，v1 不做重启持久化）
