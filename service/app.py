@@ -5,6 +5,7 @@
 FastAPI 服务骨架（docs/服务接口设计方案.md）：
   POST /api/datasets          上传模版 → datasetId + dataTreeModels + warnings + configDefaults
   POST /api/jobs              提交计算（datasetId + config）→ jobId
+  GET  /api/jobs              任务列表（内存实时态 + 落盘历史，新→旧）
   GET  /api/jobs/{jobId}      状态 queued/running/solved/failed（solved 含四项核对）
   GET  /api/jobs/{jobId}/results  取 solution.json
 方案A：power_opt 零源码改动——调 solver 前直接设置其 config 模块属性
@@ -193,12 +194,74 @@ def create_job(req: JobRequest):
     return {"jobId": job_id}
 
 
-# ============ GET 状态 / 结果 ============
+# ============ GET 任务列表 / 状态 / 结果 ============
+
+def _job_dir(job_id: str) -> Path | None:
+    """任务号即目录名；防路径穿越，只认 job_ 前缀且不含分隔符。"""
+    if not job_id.startswith("job_") or "/" in job_id or "\\" in job_id or ".." in job_id:
+        return None
+    d = JOBS_DIR / job_id
+    return d if d.is_dir() else None
+
+
+def _disk_summary(job_dir: Path, with_report: bool = False) -> dict:
+    """从落盘文件还原任务摘要（服务重启后 JOBS 内存态丢失，以盘为准）。
+    interrupted = 目录存在但既无 solution.json 也无 error.log（多为重启打断）。"""
+    job_id = job_dir.name
+    try:
+        submitted = pd.to_datetime(job_id[4:19], format="%Y%m%d_%H%M%S") \
+                        .strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        submitted = None
+    sol = job_dir / "solution.json"
+    if sol.exists():
+        d = json.loads(sol.read_text(encoding="utf-8"))
+        sc = d["effectiveConfig"]["scenario"]
+        out = {"jobId": job_id, "datasetId": d.get("datasetId"), "status": "solved",
+               "submittedAt": d.get("submittedAt") or submitted,
+               "finishedAt": d.get("finishedAt"),
+               "area": d.get("area"), "year": d.get("year"),
+               "scenario": {k: sc.get(k) for k in ("hours", "startTime", "hydrology",
+                                                   "interprovincial", "interRegionTransfer")},
+               "fourItems": d.get("fourItems")}
+        if with_report:
+            out["report"] = d.get("result", {}).get("report")
+        return out
+    log = job_dir / "error.log"
+    if log.exists():
+        lines = [l for l in log.read_text(encoding="utf-8").splitlines() if l.strip()]
+        return {"jobId": job_id, "status": "failed", "submittedAt": submitted,
+                "error": lines[-1] if lines else "unknown"}
+    return {"jobId": job_id, "status": "interrupted", "submittedAt": submitted}
+
+
+# ponytail: 列表逐个读 solution.json（每个 ~1MB），任务上百变慢时再落小摘要文件
+@app.get("/api/jobs")
+def list_jobs():
+    jobs = []
+    if JOBS_DIR.exists():
+        for job_dir in JOBS_DIR.iterdir():
+            if not job_dir.is_dir():
+                continue
+            live = JOBS.get(job_dir.name)
+            if live and live["status"] in ("queued", "running"):
+                jobs.append({"jobId": live["jobId"], "datasetId": live["datasetId"],
+                             "status": live["status"], "submittedAt": live["submittedAt"]})
+            else:
+                s = _disk_summary(job_dir)
+                if s:
+                    jobs.append(s)
+    jobs.sort(key=lambda j: j.get("submittedAt") or "", reverse=True)   # 新→旧
+    return {"jobs": jobs}
+
 
 @app.get("/api/jobs/{job_id}")
 def job_status(job_id: str):
     job = JOBS.get(job_id)
     if job is None:
+        d = _job_dir(job_id)     # 历史任务（重启后内存态丢失），从盘上还原
+        if d is not None:
+            return _disk_summary(d, with_report=True)
         raise HTTPException(404, f"job 不存在: {job_id}")
     out = {k: job[k] for k in ("jobId", "datasetId", "status", "submittedAt")
            if k in job}
@@ -217,11 +280,15 @@ def job_status(job_id: str):
 @app.get("/api/jobs/{job_id}/results")
 def job_results(job_id: str):
     job = JOBS.get(job_id)
-    if job is None:
-        raise HTTPException(404, f"job 不存在: {job_id}")
-    path = Path(job["jobDir"]) / "solution.json"
-    if job["status"] != "solved" or not path.exists():
-        raise HTTPException(409, f"任务状态 {job['status']}，尚无结果")
+    if job is not None:
+        path = Path(job["jobDir"]) / "solution.json"
+        if job["status"] != "solved" or not path.exists():
+            raise HTTPException(409, f"任务状态 {job['status']}，尚无结果")
+    else:
+        d = _job_dir(job_id)     # 历史任务：有结果文件即可取
+        if d is None or not (d / "solution.json").exists():
+            raise HTTPException(404, f"job 不存在: {job_id}")
+        path = d / "solution.json"
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -267,6 +334,7 @@ def _run_job(job_id: str):
     result = json.loads((po_config.RESULT_DIR / "结果.json").read_text(encoding="utf-8"))
     job["report"] = result["report"]
     solution = {"jobId": job_id, "datasetId": job["datasetId"],
+                "area": ds["area"], "year": ds["year"],
                 "submittedAt": job["submittedAt"], "finishedAt": _now(),
                 "fourItems": four, "effectiveConfig": cfg,
                 "convertSummary": summary, "result": result}

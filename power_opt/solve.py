@@ -77,7 +77,7 @@ def _write_result_json(path, inp, report, series, position_chart):
         },
         "report": report,
         "positionChart": position_chart,
-        "time": [ts.strftime("%Y-%m-%dT%H:%M") for ts in inp.Time],
+        "time": [ts.strftime("%Y-%m-%d %H:%M:%S") for ts in inp.Time],
         "labels": labels,
         "series": series,
     }

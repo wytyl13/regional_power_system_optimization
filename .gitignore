@@ -13,3 +13,4 @@ results/
 service/results
 service/datasets
 service/tmp_out
+*.json
