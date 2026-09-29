@@ -209,6 +209,7 @@ def job_status(job_id: str):
         out["report"] = job["report"]
     if job["status"] == "failed":
         out["error"] = job["error"]
+        out["userConfig"] = job["userConfig"]   # 失败时把请求参数带回，前端可自查
         out["startedAt"] = job.get("startedAt")
     return out
 
@@ -286,7 +287,8 @@ def _worker():
             job["status"], job["error"] = "failed", f"{type(e).__name__}: {e}"
             try:
                 (Path(job["jobDir"]) / "error.log").write_text(
-                    traceback.format_exc(), encoding="utf-8")
+                    "userConfig: " + json.dumps(job["userConfig"], ensure_ascii=False) + "\n\n"
+                    + traceback.format_exc(), encoding="utf-8")
             except OSError:
                 pass
 

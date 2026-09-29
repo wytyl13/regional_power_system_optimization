@@ -43,9 +43,10 @@ def _json_series(keys, X):
     return {"keys": [str(k) for k in keys], "data": np.asarray(X).tolist()}
 
 
-def _write_result_json(path, inp, report, series):
-    """落 结果.json（服务/前端口径）：meta + report + time + labels + series。
+def _write_result_json(path, inp, report, series, position_chart):
+    """落 结果.json（服务/前端口径）：meta + report + positionChart + time + labels + series。
     report 字段名对齐上游 海南168小时验证结果.json（m 文件无此段，5 项指标为本侧按名定义）；
+    positionChart = 老版工作位置图 27 列（全系统逐小时，列名/列序同老 Excel，缺项补 0）；
     网格非全局小时轴的条目在 series 里自带 time/标签覆盖（如 E_hyd_curt 按机组×月周期）。"""
     labels = {
         "P_th": "煤电出力(MW)", "u_th": "煤电开机(1/0)",
@@ -75,6 +76,7 @@ def _write_result_json(path, inp, report, series):
             "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         },
         "report": report,
+        "positionChart": position_chart,
         "time": [ts.strftime("%Y-%m-%dT%H:%M") for ts in inp.Time],
         "labels": labels,
         "series": series,
@@ -398,6 +400,58 @@ def solve(inp: reader.Inputs):
         peak = inp.P_week_peak
         hot_margin = float((Rhot - _np.repeat(inp.hotReserveRatio[:, None], inp.T, 1) * peak).min())
         cold_margin = float((Rcold - _np.repeat(inp.coldReserveRatio[:, None], inp.T, 1) * peak).min())
+        # ---- 工作位置图（老版 27 列口径，全系统逐小时；列名/列序同老版 Excel）----
+        # 老版恒等式（青海 8760h 导出件实测）：发电曲线=修正后负荷+电网侧充电量
+        # （抽水/电储能充电；友好电站充电是站内行为、不从电网吸功率，不进电网侧）；
+        # 储能列为净值（放电正/充电负）。需求响应=原始负荷−修正后负荷（正=净削减）。
+        # 风电发电/光伏发电含友好电站直送，新型储能含友好电站放电（电网侧口径）。
+        # 缺项补 0：启停调峰气电/送电曲线/核电压出力/调峰不足（当前模型无对应量）、
+        # 弃水（月度电量口径在 series.E_hyd_curt，不造小时值）。
+        ZT = _np.zeros(inp.T)
+        th_min = (_np.asarray(coal.P_th_min)[:, None] * u).sum(axis=0)
+        gas_min = (_np.asarray(gas.P_gas_min)[:, None] * ug).sum(axis=0)
+        bio_min = (_np.asarray(bio.P_bio_min)[:, None] * (1 - bio.m_bio)).sum(axis=0)
+        ps_net = (Pps_gen - Pps_pump).sum(axis=0)
+        es_net = (Pes_dis - Pes_ch + Pfd).sum(axis=0)
+        PD_tot = P_D.sum(axis=0)
+        pc = {
+            "核电": Pn.sum(axis=0),
+            "煤电最小技术出力": th_min,
+            "生物质最小技术出力": bio_min,
+            "气电最小技术出力": gas_min,
+            "水电强迫": Phr.sum(axis=0),
+            "气电可调": Pg.sum(axis=0) - gas_min,
+            "煤电可调": P.sum(axis=0) - th_min,
+            "生物质可调": Pb.sum(axis=0) - bio_min,
+            "启停调峰气电": ZT,
+            "水电可调": Phs.sum(axis=0),
+            "风电发电": _np.asarray(Sv.P_wind.X).sum(axis=0) + Pfw.sum(axis=0),
+            "光伏发电": _np.asarray(Sv.P_pv.X).sum(axis=0) + Pfp.sum(axis=0),
+            "电量不足": Psh.sum(axis=0),
+            "抽水蓄能": ps_net,
+            "新型储能": es_net,
+            "发电曲线": PD_tot + Pps_pump.sum(axis=0) + Pes_ch.sum(axis=0),
+            "修正后负荷曲线": PD_tot,
+            "需求响应": inp.P_load.sum(axis=0) - PD_tot,
+            "送电曲线": ZT,
+            "本地负荷": inp.P_load.sum(axis=0),
+            "水火备用": _np.asarray(Tv.R_th_hot.X).sum(axis=0) + Rhy.sum(axis=0),
+            "旋转备用": Rhot.sum(axis=0),
+            "核电压出力": ZT,
+            "弃水": ZT,
+            "调峰不足": ZT,
+            "弃风": _np.asarray(Sv.P_wind_curt.X).sum(axis=0),
+            "弃光": _np.asarray(Sv.P_pv_curt.X).sum(axis=0),
+        }
+        # plot.py 102 行同款自检：堆叠正负项合计 ≈ 修正后负荷，漏列立刻报警
+        stack = (pc["核电"] + pc["煤电最小技术出力"] + pc["煤电可调"]
+                 + pc["生物质最小技术出力"] + pc["生物质可调"]
+                 + pc["气电最小技术出力"] + pc["气电可调"] + pc["水电强迫"]
+                 + pc["水电可调"] + pc["风电发电"] + pc["光伏发电"]
+                 + pc["抽水蓄能"] + pc["新型储能"] + pc["电量不足"])
+        assert _np.abs(stack - PD_tot).max() < 1e-3, \
+            "工作位置图堆叠合计≠修正后负荷：有列漏算"
+        position_chart = {k: _np.asarray(v).tolist() for k, v in pc.items()}
         CO2_t = float(inp.Delta_t * (_np.asarray(Tv.CO2_th.X).sum()
                        + (_np.asarray(gas.CO2_gas_factor)[:, None] * Pg).sum()))  # 1001 同式
         closure = float(max(_np.abs(e[:, -1] - e[:, 0]).max(initial=0.0)
@@ -430,7 +484,8 @@ def solve(inp: reader.Inputs):
             "maxStorageClosureErrorMWh": closure,
             "mipGap": float(m.getAttr("MIPGap")),
         }
-        _write_result_json(config.RESULT_DIR / "结果.json", inp, report, series)
+        _write_result_json(config.RESULT_DIR / "结果.json", inp, report, series,
+                           position_chart)
         print("已导出: %s" % (config.RESULT_DIR / "结果.json"))
     return m, coal, gas, nuc, bio, ps, es, hyd, fr, Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv
 
