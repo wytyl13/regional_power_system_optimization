@@ -8,3 +8,8 @@ __pycache__/
 *.png
 results/
 海南2030算例/
+*.xlsx
+*.txt
+service/results
+service/datasets
+service/tmp_out
