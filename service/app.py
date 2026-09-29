@@ -34,7 +34,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from convert import _included, convert
-from defaults import merge_config
+from defaults import FIELDS_MAPPING, merge_config
 from parse_template import parse_template
 from tree import build_data_tree
 
@@ -127,7 +127,7 @@ async def upload_dataset(file: UploadFile):
                        "area": parsed["area"], "year": year, "uploadedAt": _now()}
     return {"datasetId": ds_id, "area": parsed["area"], "year": year,
             "dataTreeModels": tree, "warnings": warnings, "configDefaults": defaults,
-            "excludedUnits": excluded}
+            "fieldsMapping": FIELDS_MAPPING, "excludedUnits": excluded}
 
 
 # ============ POST /api/jobs ============
