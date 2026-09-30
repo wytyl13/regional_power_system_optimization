@@ -230,6 +230,8 @@ def solve(inp: reader.Inputs):
     m.Params.MIPFocus = config.MIP_FOCUS
     m.Params.Heuristics = config.HEURISTICS
     m.Params.DualReductions = config.DUAL_REDUCTIONS
+    m.Params.Threads = 1        # 单线程锁定多最优解（code_basic_rule 第6节规格；MATLAB 侧暂不设，保老师定稿锚点）
+    m.Params.Seed = 0           # 显式固定随机种子（默认即 0，防御性声明）
     m.Params.LogFile = str(config.RESULT_DIR / ("gurobi_py_T%d.log" % inp.T))
     m.optimize()
 
