@@ -3,11 +3,12 @@
 """
 @File    :app.py
 FastAPI 服务骨架（docs/服务接口设计方案.md）：
-  POST /api/datasets          上传模版 → datasetId + dataTreeModels + warnings + configDefaults
-  POST /api/jobs              提交计算（datasetId + config）→ jobId
-  GET  /api/jobs              任务列表（内存实时态 + 落盘历史，新→旧）
-  GET  /api/jobs/{jobId}      状态 queued/running/solved/failed（solved 含四项核对）
-  GET  /api/jobs/{jobId}/results  取 solution.json
+  POST /api/datasets                     上传模版 → datasetId + categories + config + fixedParams
+  GET  /api/datasets/{id}/curves/{sheet}  曲线懒加载（按 filterBy 键值筛，服务端规则收口）
+  POST /api/jobs                         提交计算（datasetId + config）→ jobId
+  GET  /api/jobs                         任务列表（内存实时态 + 落盘历史，新→旧）
+  GET  /api/jobs/{jobId}                 状态 queued/running/solved/failed（solved 含四项核对）
+  GET  /api/jobs/{jobId}/results         取 solution.json
 方案A：power_opt 零源码改动——调 solver 前直接设置其 config 模块属性
 （reader.py 与 model/units 均在调用时才读 config；单队列单 worker 串行，无并发写）。
 运行：service/ 目录下 `uvicorn app:app --port 8000`（勿用 --reload，会双开 worker 线程）。
@@ -30,15 +31,15 @@ os.environ.setdefault("GRB_LICENSE_FILE", r"C:\gurobi1300\win64\bin\gurobi.lic")
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from assemble import build_analysis
 from convert import _included, convert
-from defaults import FIELDS_MAPPING, merge_config
+from defaults import FIXED_PARAMS, build_form, merge_config
 from parse_template import parse_template
-from tree import build_data_tree
+from tree import build_categories, read_curve
 
 HERE = Path(__file__).resolve().parent
 DATASETS_DIR = HERE / "datasets"
@@ -86,7 +87,7 @@ async def upload_dataset(file: UploadFile):
         f.write(await file.read())
     try:
         parsed = parse_template(str(path))      # 缺 sheet/列/曲线 → ValueError
-        tree = build_data_tree(path)
+        categories = build_categories(str(path))
     except ValueError as e:
         shutil.rmtree(ds_dir, ignore_errors=True)
         raise HTTPException(422, f"模版校验失败: {e}") from None
@@ -96,10 +97,6 @@ async def upload_dataset(file: UploadFile):
     if p["nuclear"]:
         warnings.append({"code": "NUCLEAR_NO_MIN_RATIO",
                          "message": "收资未含核电最小出力率列，核电按基荷处理（最小出力=额定容量）"})
-    if p["transferCurve288"] and not p["transferCurve8760"]:
-        warnings.append({"code": "TEST_CHANNEL",
-                         "message": "送电协议仅含测试通道（288点曲线），非真实供电能力；"
-                                    "开省间互济/跨区送电的请求将被拒绝"})
     if p["friendlyStation"]:
         warnings.append({"code": "FRIENDLY_STORAGE_ASSUMED",
                          "message": "友好电站未收资储能转换效率与时长，按配置假设"
@@ -119,19 +116,39 @@ async def upload_dataset(file: UploadFile):
                          "message": f"{len(excluded)} 台机组未纳入目标年计算："
                                     + "；".join(f"{k}×{n}" for k, n in cnt.items())})
 
-    # 表单默认值 = 内置默认 + 收资值浮出（前端不写死任何默认值）
+    # 表单默认值 = 内置默认 + 收资值浮出（前端不写死任何默认值/标签）
     defaults = merge_config(None)
     defaults["scenario"]["startTime"] = f"{year}-01-01 00:00"
     defaults["province"]["hotReserveRatio"] = p["hotReserveRatio"]
     defaults["province"]["coldReserveRatio"] = p["coldReserveRatio"]
     defaults["demandResponse"]["shiftRatio"] = p["drShiftRatio"]
     defaults["demandResponse"]["cutRatio"] = p["drCutRatio"]
+    hydrology = sorted({k[1] for k in p["hydroCurves"]})   # 模版实际水文年 → 下拉枚举
 
     DATASETS[ds_id] = {"path": str(path), "parsed": parsed,
                        "area": parsed["area"], "year": year, "uploadedAt": _now()}
     return {"datasetId": ds_id, "area": parsed["area"], "year": year,
-            "dataTreeModels": tree, "warnings": warnings, "configDefaults": defaults,
-            "fieldsMapping": FIELDS_MAPPING, "excludedUnits": excluded}
+            "categories": categories,
+            "config": build_form(defaults, hydrology),
+            "fixedParams": FIXED_PARAMS,
+            "warnings": warnings, "excludedUnits": excluded}
+
+
+# ============ GET /api/datasets/{id}/curves/{sheet}（懒加载）============
+
+@app.get("/api/datasets/{ds_id}/curves/{sheet}")
+def dataset_curve(ds_id: str, sheet: str, request: Request):
+    """细分表格行点击 → 曲线懒加载。Query 参数 = curve.filterBy 各键的行值
+    （前端拿 /api/datasets 下发的 curve 元数据拼 URL，零写死；匹配规则见 tree.py）。
+    示例：http://127.0.0.1:8000/api/datasets/<id>/curves/负荷-8760?区域=海南"
+    """
+    ds = DATASETS.get(ds_id)
+    if ds is None:
+        raise HTTPException(404, f"dataset 不存在: {ds_id}")
+    try:
+        return read_curve(ds["path"], sheet, dict(request.query_params))
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from None
 
 
 # ============ POST /api/jobs ============
@@ -176,7 +193,7 @@ def validate_config(ds: dict, user: dict) -> list[str]:
         if not (isinstance(v, (int, float)) and v > 0):
             problems.append(f"penalties.{k} 须 > 0")
     if (sc["interprovincial"] or sc["interRegionTransfer"]) and not p["transferCurve8760"]:
-        problems.append("已开省间互济/跨区送电，但模版送电协议无真实 8760 送电曲线（仅测试通道）")
+        problems.append("已开省间互济/跨区送电，但模版送电协议无 8760 送电曲线")
     return problems
 
 

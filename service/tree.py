@@ -2,19 +2,44 @@
 # -*- coding: utf-8 -*-
 """
 @File    :tree.py
-模版 xlsx → 前端 dataTreeModels 菜单树（结构对齐"新建 文本文档(1).txt"样例：
-dataTreeId/dataTreeName/dataTreeOperate/dataTreeTables/dataTreeModels 嵌套，
-叶子表 {tableName, tableData:{columns, rows}}，列名=模版 sheet 表头，值全字符串）。
-树只含收资数据、只读（dataTreeEdit/dataTreeDelete=False）。
-曲线表（8760/288/水文）的 id 为外键=所属实体在源数据表的行号（负荷按 区域、
-电站类按 区域+电站名称、送电按 区域+通道名称），同一实体的曲线行共用一个 id；
-曲线表按样例剔除 区域/年度/电站名称/通道名称 等标识列（键值仍从这些列取）。
+模版 xlsx → 前端展示契约两件套：
+  build_categories：固定五大类菜单（负荷及备用/电源/送电协议/一体化电站/检修安排），
+    细分名=源 sheet 名；小表（源数据表/检修安排）全量内联 {name, columns, rows}；
+    曲线不内联，只给元数据 curve={sheet, filterBy, wholeSheet?}，前端点行后
+    调 GET /api/datasets/{id}/curves/{sheet}?<filterBy=值> 懒加载。
+  read_curve：曲线懒加载端点的取数实现（匹配规则集中本文件，app.py 只调）。
+规则（两版模版通吃，服务端收口）：
+  精确匹配：负荷/常规水电/送电协议曲线；风电=源表站名前缀归一（旧模版曲线为省略写法）；
+  光伏=整表一条因子（电站名称列是逐日占位名，不作实体键）。
 """
 from __future__ import annotations
 
 import datetime
 
 import openpyxl
+
+# ---- 曲线匹配规则注册表：细分名 → (目标 sheet, 筛选键列表, 匹配方式, 剔除列) ----
+# 匹配方式：exact=键值精确；prefix=源站名前缀归一（曲线站名∈源站名前缀）；
+#           whole=整表一条曲线，filterBy 仅校验存在。剔除列=输出的表格中不出现的
+#           伴随标识列（filterBy 键本身必剔；区域/年度等键值已在请求/源表可见）
+CURVE_RULES = {
+    "负荷": ("负荷-8760", ["区域"], "exact", ["年度"]),
+    "常规水电": ("常规水电-出力曲线", ["电站名称"], "exact", ["区域"]),
+    "风电": ("风电-出力曲线", ["电站名称"], "prefix", ["区域"]),
+    "光伏": ("光伏-出力曲线", [], "whole", ["区域", "电站名称"]),
+    "送电协议": ("送电协议-送电曲线-8760", ["区域", "通道名称", "送端", "受端"],
+                 "exact", []),
+}
+
+# ---- 固定菜单：五大类 → 细分（=源 sheet，按渲染序）；curve 细分见 CURVE_RULES ----
+CATEGORY_MAP = [
+    ("负荷及备用", ["负荷", "备用", "需求响应"]),
+    ("电源", ["核电", "抽水蓄能", "常规水电", "气电", "生物质", "煤电", "风电",
+              "光伏", "新型储能"]),
+    ("送电协议", []),          # 无细分，本级直接挂表
+    ("一体化电站", ["风光储", "风光抽"]),
+    ("检修安排", ["煤电检修安排"]),
+]
 
 
 def _s(v) -> str:
@@ -23,18 +48,15 @@ def _s(v) -> str:
         return ""
     if isinstance(v, float) and v.is_integer():
         return str(int(v))
-    if isinstance(v, datetime.datetime):
+    if isinstance(v, (datetime.datetime, datetime.date)):
         return v.strftime("%Y-%m-%d")
     return str(v)
 
 
-def _table(wb, sheet_name: str, table_name: str,
-           drop_cols: tuple[str, ...] = (), key_cols: tuple[str, ...] = (),
-           id_map: dict | None = None) -> dict | None:
-    """模版 sheet → 叶子表。sheet 不存在或全空（无表头）→ None（不出现在树里）。
-    id_map 缺省=源数据表：id 按行序 1..N；
-    id_map 给定=曲线表：id 回填关联源表行的 id（key_cols=两表共有键列，查不到→空串，
-    不造数）；drop_cols=输出剔除的列（曲线表按样例只留 id+日期/时刻/水文年+数值列）。"""
+def _table(wb, sheet_name: str) -> dict | None:
+    """源 sheet → {name, columns, rows}（全字符串、模版表头原样）。
+    sheet 不存在或无表头 → None（不出现在菜单）。不洗尾部说明行：
+    尾行若有文字说明也如实展示（收资文件长什么样前端就看到什么样）。"""
     if sheet_name not in wb.sheetnames:
         return None
     it = wb[sheet_name].iter_rows(values_only=True)
@@ -42,149 +64,134 @@ def _table(wb, sheet_name: str, table_name: str,
     if all(v is None for v in header):
         return None
     colIdx = {str(c): j for j, c in enumerate(header) if c is not None}
-    cols = [c for c in colIdx if c not in drop_cols]   # dict 保序=表头序
-    keyIdx = [colIdx[c] for c in key_cols]             # 取键先于剔列（键列本身被 drop）
-    rows, i = [], 0
+    rows = []
     for r in it:
         if r is None or all(v is None for v in r):
             continue
-        i += 1
-        cell = lambda j: _s(r[j]) if j < len(r) else ""
-        row = {"id": str(i) if id_map is None
-               else id_map.get(tuple(cell(j) for j in keyIdx), "")}
-        for c in cols:
-            row[c] = cell(colIdx[c])
-        rows.append(row)
-    return {"tableName": table_name, "tableData": {"columns": ["id"] + cols, "rows": rows}}
+        rows.append({c: _s(r[j]) if j < len(r) else "" for c, j in colIdx.items()})
+    return {"name": sheet_name, "columns": list(colIdx), "rows": rows}
 
 
-def _id_map(table: dict | None, key_cols: tuple[str, ...]) -> dict:
-    """源数据表 → {键列值元组: 行id}，供对应曲线表回填外键；键含空值的行不入映射。"""
-    if not table:
-        return {}
-    return {tuple(r[c] for c in key_cols): r["id"]
-            for r in table["tableData"]["rows"] if all(r[c] for c in key_cols)}
+def _curve_meta(sheet: str) -> dict | None:
+    if sheet not in CURVE_RULES:
+        return None
+    target, filter_by, match, drop = CURVE_RULES[sheet]
+    meta = {"sheet": target, "filterBy": filter_by, "match": match}
+    if match == "whole":
+        meta["wholeSheet"] = True
+    return meta
 
 
-def _node(tree_id: str, name: str, img: str,
-          tables: list[dict | None] = (), children: list[dict] = ()) -> dict:
-    return {
-        "dataTreeBool": True,
-        "dataTreeId": tree_id,
-        "dataTreeName": name,
-        "dataTreeOperate": {
-            "dataTreeImg": img, "dataTreeSelImg": img,
-            "dataTreeLevel": False, "dataTreeEdit": False, "dataTreeDelete": False,
-        },
-        "dataTreeTables": [t for t in tables if t],
-        "dataTreeModels": list(children),
-    }
-
-
-def build_data_tree(path) -> list[dict]:
-    """模版文件 → dataTreeModels 顶层节点列表（负荷及备用/电源/送电协议/一体化电站）。"""
+def build_categories(path) -> list[dict]:
+    """模版文件 → 固定五大类数组（顺序即渲染序，前端照序展示零写死）。
+    有 items → 二级菜单；无 items（送电协议）→ 本级直接挂 tables。"""
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     try:
-        t = lambda s, n, **kw: _table(wb, s, n, **kw)
-        # 源数据表先行：曲线表 id 回填其行号（外键），键=两表共有的标识列
-        load_src = t("负荷", "源数据表")
-        hydro_src = t("常规水电", "源数据表")
-        wind_src = t("风电", "源数据表")
-        pv_src = t("光伏", "源数据表")
-        transfer_src = t("送电协议", "源数据表")
-        load_ids = _id_map(load_src, ("区域",))
-        hydro_ids = _id_map(hydro_src, ("区域", "电站名称"))
-        wind_ids = _id_map(wind_src, ("区域", "电站名称"))
-        pv_ids = _id_map(pv_src, ("区域", "电站名称"))
-        transfer_ids = _id_map(transfer_src, ("区域", "通道名称"))
-        # 样例列名「年用电量」、模版为「用电量」：仅树输出改名（解析层仍读模版列名）
-        if load_src and "用电量" in load_src["tableData"]["columns"]:
-            td = load_src["tableData"]
-            td["columns"] = ["年用电量" if c == "用电量" else c for c in td["columns"]]
-            for r in td["rows"]:
-                r["年用电量"] = r.pop("用电量")
-        # 曲线表参数：剔除标识列；id=源表行号（外键）
-        load_curve = dict(drop_cols=("区域", "年度"), key_cols=("区域",), id_map=load_ids)
-        station_curve = dict(drop_cols=("区域", "电站名称"), key_cols=("区域", "电站名称"))
-        channel_curve = dict(drop_cols=("区域", "通道名称"), key_cols=("区域", "通道名称"))
-        return [
-            _node("DLGXFX01", "负荷及备用", "1负荷预测.png", children=[
-                _node("DLGXFX0101", "负荷", "2负荷.png", tables=[
-                    load_src,
-                    t("负荷-8760", "曲线-8760", **load_curve),
-                    t("负荷-288（基于288可生成8760）", "曲线-288", **load_curve),
-                ]),
-                _node("DLGXFX0102", "备用", "3备用.png", tables=[t("备用", "源数据表")]),
-                _node("DLGXFX0103", "需求响应", "4需求响应.png", tables=[t("需求响应", "源数据表")]),
-            ]),
-            _node("DLGXFX02", "电源", "5电源.png", children=[
-                _node("DLGXFX0201", "核电", "6核电.png", tables=[t("核电", "源数据表")]),
-                _node("DLGXFX0202", "抽水蓄能", "7抽水蓄能.png", tables=[t("抽水蓄能", "源数据表")]),
-                _node("DLGXFX0203", "常规水电", "8水电.png", tables=[
-                    hydro_src,
-                    t("常规水电-出力曲线", "水电水文", **station_curve, id_map=hydro_ids),
-                ]),
-                _node("DLGXFX0204", "气电", "9电气 电力.png", tables=[t("气电", "源数据表")]),
-                _node("DLGXFX0205", "生物质", "10生物质厂2.png", tables=[t("生物质", "源数据表")]),
-                _node("DLGXFX0206", "煤电", "11燃煤电厂.png",
-                      tables=[t("煤电", "源数据表"), t("煤电检修安排", "检修安排")]),
-                _node("DLGXFX0207", "风电", "12风电.png", tables=[
-                    wind_src,
-                    t("风电-出力曲线", "风电-8760", **station_curve, id_map=wind_ids),
-                ]),
-                _node("DLGXFX0208", "光伏", "13光伏.png", tables=[
-                    pv_src,
-                    t("光伏-出力曲线", "光伏-8760", **station_curve, id_map=pv_ids),
-                ]),
-                _node("DLGXFX0210", "新型储能", "15新能源.png", tables=[t("新型储能", "源数据表")]),
-            ]),
-            _node("DLGXFX04", "送电协议", "20送电.png", tables=[
-                transfer_src,
-                t("送电协议-送电曲线-8760", "曲线-8760", **channel_curve, id_map=transfer_ids),
-                t("送电协议-送电曲线-288（基于288生成8760）", "曲线-288",
-                  **channel_curve, id_map=transfer_ids),
-            ]),
-            _node("DLGXFX05", "一体化电站", "16一体化.png", children=[
-                _node("DLGXFX0501", "风光储", "16一体化.png", tables=[t("风光储", "源数据表")]),
-                _node("DLGXFX0502", "风光抽", "16一体化.png", tables=[t("风光抽", "源数据表")]),
-            ]),
-        ]
+        categories = []
+        for cat_name, item_sheets in CATEGORY_MAP:
+            if not item_sheets:
+                t = _table(wb, cat_name)
+                cat = {"name": cat_name,
+                       "tables": [t] if t else [],
+                       "curve": _curve_meta(cat_name)}
+                if not cat["tables"] and not cat["curve"]:
+                    continue      # sheet 缺失且无曲线 → 整类不出现
+                categories.append(cat)
+                continue
+            items = []
+            for s in item_sheets:
+                t = _table(wb, s)
+                if t is None:
+                    continue      # sheet 缺失 → 细分不出现，不造空表
+                items.append({"name": s, "tables": [t],
+                              **({"curve": c} if (c := _curve_meta(s)) else {})})
+            if items:
+                categories.append({"name": cat_name, "items": items})
+        return categories
+    finally:
+        wb.close()
+
+
+def read_curve(path, sheet: str, filters: dict[str, str]) -> dict:
+    """曲线懒加载：按 CURVE_RULES[sheet] 的匹配规则筛曲线表行。
+    filters = {filterBy 键: 行上单元格值}（前端从点击行取）。
+    返回 {columns, rows}，剔除筛选键列（值已在请求里）。
+    表存在但 0 数据行 → 返回空表（未收资如实展示）；
+    有数据但筛选 0 命中 / prefix 有歧义 → ValueError（app.py 转 422，不造数）。"""
+    rule_key = next((k for k, r in CURVE_RULES.items() if r[0] == sheet), None)
+    if rule_key is None:
+        raise ValueError(f"无此曲线表: {sheet}")
+    _, filter_by, match, drop = CURVE_RULES[rule_key]
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    try:
+        if sheet not in wb.sheetnames:
+            raise ValueError(f"模版缺曲线 sheet: {sheet}")
+        it = wb[sheet].iter_rows(values_only=True)
+        header = list(next(it, None) or [])
+        if all(v is None for v in header):
+            return {"columns": [], "rows": []}   # 全空 sheet：未收资，空表
+        colIdx = {str(c): j for j, c in enumerate(header) if c is not None}
+        # 筛选键若不在曲线表头（如此 sheet 无通名列），按未命中处理：传入值非空即 0 命中
+        cell = lambda r, c: _s(r[colIdx[c]]) if c in colIdx and colIdx[c] < len(r) else ""
+        keep = [c for c in colIdx if c not in filter_by and c not in drop]
+        rows, total, prefix_cands = [], 0, set()
+        for r in it:
+            if r is None or all(v is None for v in r):
+                continue
+            total += 1
+            if match == "whole":
+                hit = True
+            elif match == "exact":
+                hit = all(cell(r, k) == filters.get(k, "") for k in filter_by)
+            else:   # prefix：曲线站名须是给定源站名的省略写法（海风←海风2024度夏）
+                given = filters.get("电站名称", "")
+                if given and cell(r, "电站名称") not in (given,) \
+                        and not given.startswith(cell(r, "电站名称")):
+                    prefix_cands.add(cell(r, "电站名称"))
+                    continue
+                hit = True
+            if hit:
+                rows.append({c: cell(r, c) for c in keep})
+        if not rows and not total:
+            return {"columns": keep, "rows": []}  # 只表头无数据：未收资，空表
+        if match == "prefix" and not rows:
+            raise ValueError(
+                f"电站 [{filters.get('电站名称', '')}] 在曲线表 [{sheet}] 无对应曲线"
+                f"（曲线表现有实体: {sorted(prefix_cands) or '空'}）")
+        if not rows:
+            raise ValueError(f"按 {filters} 筛曲线表 [{sheet}] 命中 0 行")
+        return {"columns": keep, "rows": rows}
     finally:
         wb.close()
 
 
 if __name__ == "__main__":
-    # 自检：节点/表数量 + 曲线表外键 id + 值全字符串（海南模版）
-    tree = build_data_tree(r"..\数据模版-海南.xlsx")
-    nodes = []
+    # 自检（docs 新模版 + 旧 20261012 模版都过）：菜单结构、curve 元数据、曲线懒加载
+    import json
+    import sys
 
-    def _walk(ns):
-        for n in ns:
-            nodes.append(n)
-            _walk(n["dataTreeModels"])
-    _walk(tree)
-    leaves = [t for n in nodes for t in n["dataTreeTables"]]
-    assert [n["dataTreeId"] for n in tree] == ["DLGXFX01", "DLGXFX02", "DLGXFX04", "DLGXFX05"]
-    load = tree[0]["dataTreeModels"][0]
-    src, cur8760, cur288 = load["dataTreeTables"]
-    assert src["tableData"]["columns"] == ["id", "大区", "是否有效", "区域", "年度", "最大负荷",
-                                           "年用电量", "负荷曲线", "供暖期", "保安开机"]
-    assert cur8760["tableData"]["columns"] == ["id", "日期"] + [f"{h}时" for h in range(24)]
-    assert cur288["tableData"]["columns"] == ["id", "时刻"] + [f"{m}月" for m in range(1, 13)]
-    assert all(isinstance(v, str) for r in cur8760["tableData"]["rows"] for v in r.values())
-    # 曲线表 id 外键：只能是同节点源数据表行号或空串（空=曲线引用了源表没有的实体，
-    # 不造数）。同 id 行数正常应为单实体曲线行数（8760→365、负荷288→25、水文→6、
-    # 送电288→24），异常即模版数据问题，打印供核对不判失败
-    for node_name, tbl_name in [("负荷", "曲线-8760"), ("负荷", "曲线-288"),
-                                ("风电", "风电-8760"), ("光伏", "光伏-8760"),
-                                ("常规水电", "水电水文"), ("送电协议", "曲线-288")]:
-        node = next(n for n in nodes if n["dataTreeName"] == node_name)
-        cur = next(t for t in node["dataTreeTables"] if t["tableName"] == tbl_name)
-        src_ids = {r["id"] for t in node["dataTreeTables"] if t["tableName"] == "源数据表"
-                   for r in t["tableData"]["rows"]}
-        ids = [r["id"] for r in cur["tableData"]["rows"]]
-        assert set(ids) <= src_ids | {""}, f"{tbl_name}: 出现源表没有的 id {set(ids) - src_ids}"
-        print(f"{node_name}/{tbl_name}: rows={len(ids)}, "
-              f"id行数统计={ {i: ids.count(i) for i in sorted(set(ids))} }")
-    print(f"nodes ok; tables={len(leaves)}; "
-          f"load8760 rows={len(cur8760['tableData']['rows'])}")
+    for path in (sys.argv[1:] or [r"..\docs\数据模版-海南.xlsx"]):
+        print(f"===== {path}")
+        cats = build_categories(path)
+        assert [c["name"] for c in cats] == ["负荷及备用", "电源", "送电协议",
+                                             "一体化电站", "检修安排"]
+        for c in cats:
+            subs = [i["name"] for i in c.get("items", [])]
+            print(" ", c["name"], subs or "<tables at this level>")
+            if "curve" in c:
+                print("    curve:", json.dumps(c["curve"], ensure_ascii=False))
+            for i in c.get("items", []):
+                if "curve" in i:
+                    print(f"    {i['name']}.curve:", json.dumps(i["curve"], ensure_ascii=False))
+        # 曲线懒加载三连：负荷（exact）/ 风电（prefix，旧模版）/ 光伏（whole）
+        load_rows = read_curve(path, "负荷-8760", {"区域": "海南"})
+        assert len(load_rows["rows"]) == 365 and load_rows["columns"][0] == "日期", len(load_rows["rows"])
+        print("  负荷-8760(区域=海南) rows =", len(load_rows["rows"]))
+        pv = read_curve(path, "光伏-出力曲线", {})
+        print("  光伏整表 rows =", len(pv["rows"]))
+        try:
+            read_curve(path, "风电-出力曲线", {"电站名称": "不存在的站"})
+            raise AssertionError("应报 422")
+        except ValueError as e:
+            print("  风电 0 命中报错 OK:", e)
+    print("categories self-check PASS")

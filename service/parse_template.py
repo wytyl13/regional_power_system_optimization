@@ -12,6 +12,14 @@ import openpyxl
 
 HOURS = [f"{h}时" for h in range(24)]
 
+# 新模版把单位/口径说明写进了表头（parse 认旧名，双名兼容两版模版通吃）
+COL_ALIAS = {
+    "最大负荷（万千瓦）": "最大负荷",
+    "用电量（亿千瓦时）": "用电量",
+    "旋转备用（每周备用需求的规模为当周最大负荷的上述比例）": "旋转备用",
+    "转移型负荷响应比例（每周响应潜力的规模为当周最大负荷的上述比例）": "转移型负荷响应比例",
+}
+
 
 def _load(path):
     return openpyxl.load_workbook(path, read_only=True, data_only=True)
@@ -30,6 +38,7 @@ def _rows(wb, sheet, required_cols, key_col=None):
         raise ValueError(f"sheet [{sheet}] 无表头") from None
     if all(v is None for v in header):   # 全空 sheet（如送电曲线-8760 未填）
         return []
+    header = [COL_ALIAS.get(str(c), c) if c is not None else c for c in header]
     idx = {}
     for col in required_cols:
         if col not in header:
@@ -147,11 +156,10 @@ def _parse(wb) -> dict:
     d["hydroCurves"] = {(r["电站名称"], r["水文年"], r["出力类型"]):
                         [float(r[f"{m}月"]) for m in range(1, 13)] for r in hrows}
 
-    # ---- 送电协议（海南为空；测试通道仅 288 曲线，非真实供电能力）----
+    # ---- 送电协议（海南收资为空：源表 0 行、8760 曲线只有表头 → 空如实展示；
+    #      288 测试通道 v1 不用：既不展示也不参与计算，解析整段移除）----
     d["interconnection"] = _rows(wb, "送电协议",
                                  ["通道名称", "送端", "受端", "状态", "投产时间"])
-    d["transferCurve288"] = ("送电协议-送电曲线-288（基于288生成8760）" in wb.sheetnames
-                             and bool(_rows(wb, "送电协议-送电曲线-288（基于288生成8760）", ["通道名称"])))
     d["transferCurve8760"] = _rows(wb, "送电协议-送电曲线-8760", ["日期"] + HOURS) \
         if "送电协议-送电曲线-8760" in wb.sheetnames else []
 
@@ -164,4 +172,5 @@ if __name__ == "__main__":
     print("area:", t["area"], "year:", t["year"], "maxLoad:", t["maxLoadWan"])
     print("coal:", len(t["coal"]), "gas:", len(t["gas"]), "mtn:", len(t["coalMaintenance"]),
           "loadDays:", len(t["loadCurve"]), "windDays:", len(t["windCurves"]),
-          "pvDays:", len(t["pvCurves"]), "hydroCurves:", len(t["hydroCurves"]))
+          "pvDays:", len(t["pvCurves"]), "hydroCurves:", len(t["hydroCurves"]),
+          "transfer8760:", len(t["transferCurve8760"]))

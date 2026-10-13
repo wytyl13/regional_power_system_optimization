@@ -1,7 +1,6 @@
 *.log
 *.mat
 *.png
-*.xlsx
 *.txt
 *.json
 *.csv
@@ -13,12 +12,12 @@ CLAUDE.md
 __pycache__/
 .ipynb_checkpoints/
 results/
-海南2030算例/
 results/
 datasets/
 tmp_out/
-docs/
+docs/temp
 分析结果/
+1、优化模型0918/
 
 TODO.md
 

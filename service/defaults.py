@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 @File    : defaults.py
-默认配置（= 海南2030算例已验证基线）。前端表单的 configDefaults 即本文件；
+默认配置（= 海南2030算例已验证基线）。config 表单块由本文件生成（build_form）；
 用户 config 与其深合并后生效，取值优先级：用户显式传入 > Excel 收资值 > 本默认。
 所有值的来源见 docs/服务接口设计方案.md §2.2 与 service/ground_truth.txt。
 """
@@ -135,7 +135,7 @@ DEFAULT_CONFIG = {
 
 
 # configDefaults 字段 → 中文描述（含收资浮出的 hotReserveRatio/coldReserveRatio；
-# 供 /api/datasets 响应的 fieldsMapping 键使用，前端表单标签即取此表）
+# build_form 本地取用：label=标签、value=默认值，服务响应不再单独下发 fieldsMapping）
 FIELDS_MAPPING = {
     # ---- scenario 情景 ----
     "scenario.startTime": "求解起始时间",
@@ -266,3 +266,37 @@ def merge_config(user: dict | None) -> dict:
     if user:
         _merge(cfg, user)
     return cfg
+
+
+# ---- 服务端固定口径（convert.py 写死、config 改不动的部分；/api/datasets 只读展示）----
+FIXED_PARAMS = [
+    {"key": "wanToMW", "label": "容量单位换算",
+     "value": "源表装机为 万kW 口径：容量 ×10 → MW；曲线为归一化因子，负荷=因子×最大负荷"},
+    {"key": "curveBlend", "label": "8760 曲线合成",
+     "value": "风电=纳入电站出力曲线按装机容量加权合成一条容量因子；光伏=全区一条因子"},
+    {"key": "energyFormula", "label": "储能容量换算",
+     "value": "储能容量 = 功率 × 时长 × √(源表转换效率) ÷ 0.8（抽蓄/新型储能/友好站三处同式）"},
+    {"key": "coalEmissionNodes", "label": "煤电碳排线性化",
+     "value": "Pmin→Pmax 等分 6 节点；节点速率 = 单位热值碳排 × 3.6 ÷ 发电效率 × P"
+              " × (1 + 低位修正系数 × (1 − P÷CAP))，系数可在 emission 配置组修改"},
+    {"key": "weekAnchor", "label": "周锚点口径",
+     "value": "备用需求/需求响应潜力按当周最大负荷的比例展开；含 1月1日 的那周周一为第 1 周"},
+    {"key": "maintenanceParse", "label": "煤电检修口径",
+     "value": "源表逐日标记为 1 的连续日期折算为起止区间（右端排他），不连续即报错"},
+    {"key": "windCurveMatch", "label": "风电曲线匹配",
+     "value": "出力曲线站名按源表电站名前缀归一（曲线表为省略写法，两版模版通吃）"},
+    {"key": "pvCurveRule", "label": "光伏曲线口径",
+     "value": "光伏出力曲线整表对应全区一条因子，电站名称列不作实体键"},
+]
+
+
+def build_form(defaults: dict, hydrology: list) -> dict:
+    """配置默认值 + 字段标签 → /api/datasets 的 config 表单块
+    {组:{键:{label, value, options?}}}。wire 格式不变：提交计算时前端只回
+    {组:{键:值}}（POST /api/jobs 原契约），label/options 剥掉不回传。"""
+    form = {}
+    for g, kv in defaults.items():
+        form[g] = {k: {"label": FIELDS_MAPPING.get(f"{g}.{k}", f"{g}.{k}"), "value": v}
+                   for k, v in kv.items()}
+    form["scenario"]["hydrology"]["options"] = sorted(hydrology)
+    return form

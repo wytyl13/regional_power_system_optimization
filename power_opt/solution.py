@@ -1,6 +1,13 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""求解结果的唯一定义与取值出口。"""
+"""
+@Time    : 2026/10/13 11:58
+@Author  : weiyutao
+@File    : solution.py
+求解结果的唯一定义与取值出口。
+"""
+
+
 
 from __future__ import annotations
 
