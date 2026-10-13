@@ -16,8 +16,13 @@ results/
 datasets/
 tmp_out/
 docs/temp
+docs/temp/
 分析结果/
 1、优化模型0918/
 
+海南2030算例/
+海南2030算例_20261012/
+tests/tmp_*
+service/tmp_out/
+service/regression_report.txt
 TODO.md
-

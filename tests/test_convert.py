@@ -11,18 +11,21 @@ from __future__ import annotations
 
 import math
 import numbers
+import sys
 from pathlib import Path
 
 import pandas as pd
 
-from convert import convert
-from parse_template import parse_template
+SERVICE = Path(__file__).resolve().parent.parent / "service"
+sys.path.insert(0, str(SERVICE))
+from convert import convert  # noqa: E402
+from parse_template import parse_template  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-TPL = ROOT / "数据模版-海南(1).xlsx"
-GT_DIR = ROOT / "海南2030算例"
-OUT = HERE / "tmp_out"
+TPL = ROOT / "海南2030算例_20261012" / "数据模版-海南.xlsx"
+GT_DIR = ROOT / "海南2030算例_20261012"
+OUT = SERVICE / "tmp_out"
 
 SHEETS = {
     "分区机组信息表.xlsx": ["分区表", "煤电", "气电", "核电", "生物质", "抽水蓄能",
@@ -85,7 +88,7 @@ def main():
     diffs: list[str] = []
     for fname, sheets in SHEETS.items():
         compare(GT_DIR / fname, OUT / fname, sheets, diffs)
-    report = HERE / "regression_report.txt"
+    report = HERE / "tmp_regression_report.txt"
     report.write_text("\n".join(diffs) if diffs else "ALL PASS", encoding="utf-8")
     print(f"units={summary['unitCounts']}")
     print(f"excluded={len(summary['excluded'])} maintenance={summary['maintenance']}")

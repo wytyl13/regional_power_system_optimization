@@ -9,6 +9,7 @@ conda create --name power_opt python=3.10
 conda activate power_opt
 pip install -r requirements.txt
 $env:GRB_LICENSE_FILE="C:\gurobi1300\win64\bin\gurobi.lic"; python -X utf8 solve.py
+C:\gurobi1103\win64\bin\gurobi.lic
 
 matlab发给我的原始日志（gurobi10）：
 Original: Optimize a model with 1343417 rows, 820095 columns and 3921216 nonzeros
