@@ -19,9 +19,6 @@ import matplotlib.pyplot as plt
 
 import config
 import reader
-import solve as S
-from model import context as CT
-from model.units import thermal as TH
 
 # MATLAB 1203-1206 plotDeviceNames（21 列，顺序即堆叠顺序）
 DEVICE_NAMES = ['煤电', '气电', '生物质', '径流式水电', '库容式水电',
@@ -39,8 +36,7 @@ DEVICE_COLORS = np.array([
     [0.49, 0.47, 0.65], [0.71, 0.63, 0.48], [0.85, 0.26, 0.30]])
 
 
-def build_device_data(inp, coal, gas, nuc, bio, ps, es, hyd, fr,
-                      Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv):
+def build_device_data(inp, solution):
     """MATLAB 1188-1196 plotDeviceData：21 列设备×分区×小时，发电正/充电抽水负。
     光热/省间互济/既定跨区：未建模或开关关闭 → 0 列（债，待对应模块接入）。"""
     Z = lambda *shape: np.zeros(shape)                      # 未建模电源列 = 0
@@ -50,27 +46,29 @@ def build_device_data(inp, coal, gas, nuc, bio, ps, es, hyd, fr,
     A_line = Z(inp.Narea, inp.N_line)
     A_line[inp.line_from, np.arange(inp.N_line)] = -1
     A_line[inp.line_to, np.arange(inp.N_line)] = 1
-    P = lambda mv: np.asarray(mv.X)
+    V = solution.values
+    area = lambda name: solution.units[name]["area"]
+    count = lambda name: len(solution.units[name]["keys"])
     return np.stack([                                     # cat(3,...) 同序
-        A(coal.N_th, coal.area_th) @ P(Tv.P_th),             # 煤电
-        A(gas.N_gas, gas.area_gas) @ P(Gv.P_gas),            # 气电
-        A(bio.N_bio, bio.area_bio) @ P(Bv.P_bio),            # 生物质
-        A(hyd.N_hyd_ror, hyd.area_hyd_ror) @ P(Hv.P_hyd_ror),  # 径流式水电
-        A(hyd.N_hyd_res, hyd.area_hyd_res) @ P(Hv.P_hyd_res),  # 库容式水电
-        A(nuc.N_nuc, nuc.area_nuc) @ P(Nv.P_nuc),            # 核电
-        P(Sv.P_wind), P(Sv.P_pv), Z(inp.Narea, inp.T),       # 风电/光伏/光热(未建模)
-        A(fr.N_fr, fr.area_fr) @ (P(Fv.P_fr_wind_out)        # 友好电站风电（直送+站内充）
-                                   + P(Fv.P_fr_wind_ch)),
-        A(fr.N_fr, fr.area_fr) @ (P(Fv.P_fr_pv_out)          # 友好电站光伏（直送+站内充）
-                                   + P(Fv.P_fr_pv_ch)),
-        A(fr.N_fr, fr.area_fr) @ P(Fv.P_fr_discharge),       # 友好电站放电
-        A(ps.N_ps, ps.area_ps) @ P(Pv.P_ps_gen),             # 抽蓄发电
-        A(es.N_es, es.area_es) @ P(Ev.P_es_discharge),       # 电储能放电
-        -A(ps.N_ps, ps.area_ps) @ P(Pv.P_ps_pump),           # 抽蓄抽水（负半轴）
-        -A(es.N_es, es.area_es) @ P(Ev.P_es_charge),         # 电储能充电（负半轴）
-        -A(fr.N_fr, fr.area_fr) @ P(Fv.P_fr_charge),         # 友好电站充电（负半轴）
-        A_line @ P(Sv.P_line), Z(inp.Narea, inp.T),          # 省内净交换/省间互济(开关关)
-        Z(inp.Narea, inp.T), P(Sv.P_shed)], axis=2)          # 既定跨区(开关关)/未供电负荷
+        A(count("thermal"), area("thermal")) @ V["P_th"],    # 煤电
+        A(count("gas"), area("gas")) @ V["P_gas"],            # 气电
+        A(count("biomass"), area("biomass")) @ V["P_bio"],   # 生物质
+        A(count("hydro_ror"), area("hydro_ror")) @ V["P_hyd_ror"],  # 径流式水电
+        A(count("hydro_reservoir"), area("hydro_reservoir")) @ V["P_hyd_res"],  # 库容式水电
+        A(count("nuclear"), area("nuclear")) @ V["P_nuc"],    # 核电
+        V["P_wind"], V["P_pv"], Z(inp.Narea, inp.T),         # 风电/光伏/光热(未建模)
+        A(count("friendly"), area("friendly")) @ (V["P_fr_wind_out"]
+                                                  + V["P_fr_wind_ch"]),
+        A(count("friendly"), area("friendly")) @ (V["P_fr_pv_out"]
+                                                  + V["P_fr_pv_ch"]),
+        A(count("friendly"), area("friendly")) @ V["P_fr_discharge"],
+        A(count("pumped_storage"), area("pumped_storage")) @ V["P_ps_gen"],
+        A(count("electrochemical"), area("electrochemical")) @ V["P_es_discharge"],
+        -A(count("pumped_storage"), area("pumped_storage")) @ V["P_ps_pump"],
+        -A(count("electrochemical"), area("electrochemical")) @ V["P_es_charge"],
+        -A(count("friendly"), area("friendly")) @ V["P_fr_charge"],
+        A_line @ V["P_line"], Z(inp.Narea, inp.T),           # 省内净交换/省间互济(开关关)
+        Z(inp.Narea, inp.T), V["P_shed"]], axis=2)            # 既定跨区(开关关)/未供电负荷
 
 
 def _scopes(inp):
@@ -87,17 +85,16 @@ def _scopes(inp):
     return scopes
 
 
-def write_chart_csv(inp, coal, gas, nuc, bio, ps, es, hyd, fr,
-                    Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv, path=None):
+def write_chart_csv(inp, solution, path=None):
     """绘图曲线 CSV（前端复现 设备运行_*.png 用）：Time + 21 设备列 + 2 条负荷线。
     列名即 PNG 图例文字；充电/抽水/净送出列已是负值，前端正半轴堆正、负半轴堆负即可。
     全 T 行（PNG 只画前 168 小时，前端自行截取）；utf-8-sig 让中文列名 Excel 直开；
     全精度不四舍五入（同其他结果件纪律）。全 0 列（如海南的光热/省间互济）照常输出，
     前端按 PNG 的 visibleDevices 逻辑隐藏即可。"""
-    device = build_device_data(inp, coal, gas, nuc, bio, ps, es, hyd, fr,
-                               Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv)
-    P_D = inp.P_load - np.asarray(Sv.P_shift_out.X) + np.asarray(Sv.P_shift_in.X) \
-        - np.asarray(Sv.P_cut.X)                            # MATLAB 1240 plotNetLoad
+    device = build_device_data(inp, solution)
+    V = solution.values
+    P_D = inp.P_load - V["P_shift_out"] + V["P_shift_in"] \
+        - V["P_cut"]                                        # MATLAB 1240 plotNetLoad
     # 与 plot_operation 同款自检：21 列逐点合计 ≈ 响应后负荷，漏列立刻报警
     assert np.abs(device.sum(axis=2) - P_D).max() < 1e-3, "21 列合计≠响应后负荷：有设备列漏画"
     scopes = _scopes(inp)
@@ -114,17 +111,15 @@ def write_chart_csv(inp, coal, gas, nuc, bio, ps, es, hyd, fr,
     print("已导出:", path)
 
 
-def plot_operation(inp, coal, gas, nuc, bio, ps, es, hyd, fr,
-                   Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv, save_png=False):
+def plot_operation(inp, solution, save_png=False):
     """MATLAB 1217-1299：全系统（+多省时省级，+Narea>1 时各分区）设备运行堆叠图。
     海南单分区 → 只有"全系统"1 张图。"""
     # MATLAB 1195-1196：默认展示前 168 小时
     plotRows = np.arange(0, min(168, inp.T))
     plotTime = inp.Time[plotRows]
-    device = build_device_data(inp, coal, gas, nuc, bio, ps, es, hyd, fr,
-                               Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv)
-    P_D = inp.P_load - np.asarray(Sv.P_shift_out.X) + np.asarray(Sv.P_shift_in.X) \
-        - np.asarray(Sv.P_cut.X)                            # MATLAB 1240 plotNetLoad
+    device = build_device_data(inp, solution)
+    P_D = inp.P_load - solution.values["P_shift_out"] \
+        + solution.values["P_shift_in"] - solution.values["P_cut"]
     # 自检：21 列逐点合计 ≈ 响应后负荷（与 solve 残差同一恒等式），漏列立刻报警
     assert np.abs(device.sum(axis=2) - P_D).max() < 1e-3, "21 列合计≠响应后负荷：有设备列漏画"
 
@@ -193,17 +188,16 @@ def main(T: int = 24, save_png: bool = False):
     plt.rcParams["font.family"] = ["Microsoft YaHei"]            # MATLAB 1268 FontName
     plt.rcParams["axes.unicode_minus"] = False
     config.T = T
+    from solve import solve
     inp = reader.load_inputs()
-    m, coal, gas, nuc, bio, ps, es, hyd, fr, Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv = S.solve(inp)
-    if m.SolCount == 0:
+    solution = solve(inp)
+    if solution.four_items["objective"]["value"] is None:
         print("无可行解，不出图"); return
-    plot_operation(inp, coal, gas, nuc, bio, ps, es, hyd, fr,
-                   Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv, save_png=save_png)
+    plot_operation(inp, solution, save_png=save_png)
 
 
 if __name__ == "__main__":
     import sys
-    from model import context as CT
     T = int(sys.argv[1]) if len(sys.argv) > 1 else 24
     save = (len(sys.argv) > 2 and sys.argv[2] == "save")
     main(T, save_png=save)

@@ -26,6 +26,7 @@ class FrInputs:
     """MATLAB 1.19 节工作区变量的镜像；变量名与 MATLAB 一致。"""
     N_fr: int
     UnitKey_fr: list
+    name_fr: list                # 机组名（八~十一节分析表用，MATLAB friendlyData.NAME）
     area_fr: np.ndarray           # 电站 → 分区（0 基，AreaID 列）
     P_fr_es_max: np.ndarray       # 储能功率上限，MW（ES_POWER）
     E_fr_max: np.ndarray; E_fr_min: np.ndarray; E_fr_upper: np.ndarray
@@ -46,7 +47,7 @@ def load_fr(inp: Inputs) -> FrInputs:
               "SOC_MIN", "SOC_MAX", "SOC_INITIAL", "ETA_CHARGE", "ETA_DISCHARGE",
               "SELF_DISCHARGE", "POWER_COST", "ENERGY_COST", "REPLACE_FACTOR",
               "MAX_CYCLES", "FOM_COST_PERIOD", "FOM_ENERGY_PERIOD",
-              "WIND_FOM_PERIOD", "PV_FOM_PERIOD"]
+              "WIND_FOM_PERIOD", "PV_FOM_PERIOD", "NAME"]
     frData = _read(config.UNIT_FILE, "新能源友好电站", req_fr)
     N_fr = len(frData)
     zone_fr = [_zstr(v) for v in frData["AreaID"]]
@@ -56,6 +57,7 @@ def load_fr(inp: Inputs) -> FrInputs:
     area_fr = np.array([areaPos[z] for z in zone_fr], dtype=int)
     f = lambda c: frData[c].to_numpy(float)
     UnitKey_fr = frData["UnitKey"].astype(str).tolist()
+    name_fr = frData["NAME"].astype(str).tolist()                 # 八~十一节分析表用
     P_fr_es_max = f("ES_POWER"); E_fr_max = f("ENERGY_MWH")
     E_fr_min = E_fr_max * f("SOC_MIN")                      # MATLAB 484
     E_fr_upper = E_fr_max * f("SOC_MAX")                    # 485
@@ -89,7 +91,7 @@ def load_fr(inp: Inputs) -> FrInputs:
             raise ValueError(f"{name} 含 NaN/Inf，检查友好电站输入表")
 
     return FrInputs(
-        N_fr=N_fr, UnitKey_fr=UnitKey_fr, area_fr=area_fr,
+        N_fr=N_fr, UnitKey_fr=UnitKey_fr, name_fr=name_fr, area_fr=area_fr,
         P_fr_es_max=P_fr_es_max, E_fr_max=E_fr_max, E_fr_min=E_fr_min,
         E_fr_upper=E_fr_upper, E_fr_initial=E_fr_initial,
         eta_fr_ch=eta_fr_ch, eta_fr_dis=eta_fr_dis, loss_fr=loss_fr,

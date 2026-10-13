@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+﻿#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
 @Time    : 2026/09/28 11:00
@@ -12,14 +12,14 @@
 
 from __future__ import annotations
 
-import json
 import numpy as np
-import pandas as pd
 import gurobipy as gp
 from datetime import datetime
 
 import config
 import reader
+from solution import (SolutionData, compute_metrics, extract_all,
+                      write_result_json, write_timeseries_csv)
 from model.units import thermal as TH
 from model.units import gas as GA
 from model.units import nuclear as NU
@@ -36,53 +36,6 @@ def _wsum(w: np.ndarray, X: gp.MVar, T: int):
     w 按 np.repeat 铺 (N,T) 后逐元素乘（沙盒已实测的广播原语）再全求和。"""
     W = np.repeat(np.asarray(w)[:, None], T, axis=1)
     return (W * X).sum()
-
-
-def _json_series(keys, X):
-    """一条 series 条目 {keys: 行标签, data: N×T 数值}；不写 time = 挂全局小时轴。"""
-    return {"keys": [str(k) for k in keys], "data": np.asarray(X).tolist()}
-
-
-def _write_result_json(path, inp, report, series, position_chart):
-    """落 结果.json（服务/前端口径）：meta + report + positionChart + time + labels + series。
-    report 字段名对齐上游 海南168小时验证结果.json（m 文件无此段，5 项指标为本侧按名定义）；
-    positionChart = 老版工作位置图 27 列（全系统逐小时，列名/列序同老 Excel，缺项补 0）；
-    网格非全局小时轴的条目在 series 里自带 time/标签覆盖（如 E_hyd_curt 按机组×月周期）。"""
-    labels = {
-        "P_th": "煤电出力(MW)", "u_th": "煤电开机(1/0)",
-        "P_gas": "气电出力(MW)", "u_gas": "气电开机(1/0)",
-        "P_nuc": "核电出力(MW)", "P_bio": "生物质出力(MW)",
-        "P_wind": "风电出力(MW)", "P_pv": "光伏出力(MW)",
-        "P_wind_curt": "风电弃电(MW)", "P_pv_curt": "光伏弃电(MW)",
-        "P_shed": "未供电负荷(MW)",
-        "P_shift_out": "需求响应转出(MW)", "P_shift_in": "需求响应转入(MW)",
-        "P_cut": "需求响应削减(MW)",
-        "P_ps_gen": "抽蓄发电(MW)", "P_ps_pump": "抽蓄抽水(MW)",
-        "E_ps": "抽蓄蓄电量(MWh)，T+1列：第0列=初值，第k列=第k小时末",
-        "P_es_charge": "电储能充电(MW)", "P_es_discharge": "电储能放电(MW)",
-        "E_es": "电储能荷电量(MWh)，T+1列（同E_ps）",
-        "P_hyd_ror": "径流式水电出力(MW)", "P_hyd_res": "库容式水电出力(MW)",
-        "R_hyd_hot": "水电热备用(MW)",
-        "E_hyd_curt": "水电弃水量(MWh)，按机组×月周期一行",
-        "P_fr_wind_out": "友好电站风电直送(MW)", "P_fr_pv_out": "友好电站光伏直送(MW)",
-        "P_fr_charge": "友好电站充电(MW)", "P_fr_discharge": "友好电站放电(MW)",
-        "E_fr": "友好电站荷电量(MWh)，T+1列（同E_ps）",
-    }
-    doc = {
-        "meta": {
-            "T": inp.T, "delta_t_hours": inp.Delta_t,
-            "startTime": str(inp.Time[0]), "endTime": str(inp.Time[-1]),
-            "scenario": config.HYDROLOGY_SCENARIO,
-            "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        },
-        "report": report,
-        "positionChart": position_chart,
-        "time": [ts.strftime("%Y-%m-%d %H:%M:%S") for ts in inp.Time],
-        "labels": labels,
-        "series": series,
-    }
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(doc, f, ensure_ascii=False, separators=(",", ":"))
 
 
 def build(m: gp.Model, inp: reader.Inputs):
@@ -124,8 +77,9 @@ def add_objective(m: gp.Model, inp: reader.Inputs, coal: TH.CoalInputs,
                   ps: PS.PSInputs, es: ES.ESInputs, hyd: HY.HydInputs, fr: FR.FrInputs,
                   Tv: TH.ThermalVars, Gv: GA.GasVars, Nv: NU.NuclearVars, Bv: BI.BiomassVars,
                   Pv: PS.PSVars, Ev: ES.ESVars, Hv: HY.HydVars, Fv: FR.FrVars,
-                  Sv: CT.SystemVars) -> float:
-    """MATLAB 4.1-4.14（1016-1094）一比一对照；返回常数部分供对账。"""
+                  Sv: CT.SystemVars) -> dict:
+    """MATLAB 4.1-4.14（1016-1094）一比一对照；返回成本表达式 dict 供取值
+    （六大项/十项分解对齐 MATLAB 1290-1312 行；海南无光热/互济，C_csp/C_inter=0）。"""
     T, Delta_t = inp.T, inp.Delta_t
 
     # ---- 4.1 煤电（1016-1025）----
@@ -208,15 +162,46 @@ def add_objective(m: gp.Model, inp: reader.Inputs, coal: TH.CoalInputs,
     m.setObjective(C_th + C_gas + C_nuc + C_bio + C_ps + C_es + C_hyd + C_fr
                    + C_DR + C_curt + C_shed + C_windFOM + C_pvFOM,
                    gp.GRB.MINIMIZE)          # 1088-1093（C_gen 含 C_hyd/C_fr，C_curt 含四项）
-    return consts
+
+    # ---- 成本分项（供 CostSummary/CostDetail 取值，MATLAB 1084-1093 + 1290-1312）----
+    # 六大项：C_gen=C_th+C_gas+C_nuc+C_bio+C_windFOM+C_pvFOM+C_hyd+C_fr（1088，
+    #   排放已分别计入 C_th/C_gas，不重复计）；C_sto=C_ps+C_es（1089）；
+    #   C_curt 已含四项弃电（1090）；C_inter=0（海南无省间互济量）
+    # 十项性质分解（1302-1309）：固定运维/变动发电/启停/碳排/污染物/老化
+    #   与六大项是同一总成本的两种视角，不能相加
+    C_CO2 = C_th_CO2 + C_gas_CO2                                        # 1084
+    C_pollution = C_th_SO2 + C_th_NOX + C_th_dust                       # 1085
+    return {
+        "constants": consts,
+        "C_gen": C_th + C_gas + C_nuc + C_bio + C_windFOM + C_pvFOM
+                 + C_hyd + C_fr,
+        "C_sto": C_ps + C_es,
+        "C_DR": C_DR, "C_curt": C_curt, "C_shed": C_shed, "C_inter": 0.0,
+        "C_th": C_th, "C_gas": C_gas, "C_nuc": C_nuc, "C_bio": C_bio,
+        "C_fr": C_fr, "C_hyd": C_hyd, "C_es": C_es, "C_ps": C_ps,
+        "C_windFOM": C_windFOM, "C_pvFOM": C_pvFOM,
+        "C_th_fuel": C_th_fuel, "C_th_start": C_th_start, "C_th_stop": C_th_stop,
+        "C_th_FOM": C_th_FOM, "C_th_CO2": C_th_CO2,
+        "C_th_SO2": C_th_SO2, "C_th_NOX": C_th_NOX, "C_th_dust": C_th_dust,
+        "C_gas_gen": C_gas_gen, "C_gas_start": C_gas_start,
+        "C_gas_stop": C_gas_stop, "C_gas_FOM": C_gas_FOM, "C_gas_CO2": C_gas_CO2,
+        "C_nuc_gen": C_nuc_gen, "C_nuc_FOM": C_nuc_FOM,
+        "C_bio_gen": C_bio_gen, "C_bio_FOM": C_bio_FOM,
+        "C_es_degrade": C_es_degrade, "C_es_FOM": C_es_FOM,
+        "C_fr_degrade": C_fr_degrade, "C_fr_FOM": C_fr_FOM,
+        "C_hyd_curt": C_hyd_curt, "C_CO2": C_CO2, "C_pollution": C_pollution,
+        "C_wind_curt": inp.c_wind_curt * Delta_t * Sv.P_wind_curt.sum(),
+        "C_pv_curt": inp.c_pv_curt * Delta_t * Sv.P_pv_curt.sum(),
+        "C_fr_curt": C_fr_curt,
+    }
 
 
 def solve(inp: reader.Inputs):
-    """组装 + 目标 + 求解；返回 (m, coal, gas, nuc, bio, ps, es, hyd, fr, Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv)。"""
+    """组装 + 求解 + 取值；返回纯数据 SolutionData，不做前端口径组装。"""
     m = gp.Model("coal_gas_nuc_bio_sto_hyd_fr_T%d" % inp.T)
     coal, gas, nuc, bio, ps, es, hyd, fr, Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv, units = build(m, inp)
-    consts = add_objective(m, inp, coal, gas, nuc, bio, ps, es, hyd, fr,
-                           Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv)
+    cost_exprs = add_objective(m, inp, coal, gas, nuc, bio, ps, es, hyd, fr,
+                               Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv)
     m.update()
 
     # 本次运行子目录：results/ 下按 参数+时间戳 命名，日志/CSV/图 全落这里
@@ -246,264 +231,30 @@ def solve(inp: reader.Inputs):
     if m.SolCount > 0:
         gap = m.getAttr("MIPGap")
         print("目标函数值: %.6f 元（常数部分 %.6f，MIPGap %.4f%%，耗时 %.1fs）"
-              % (m.ObjVal, consts, 100 * gap, m.Runtime))
-        # ---- 结果落盘 + 平衡残差（对齐 MATLAB 1177-1190 的自检）----
-        import numpy as _np
-        P = _np.asarray(Tv.P_th.X); u = _np.round(Tv.u_th.X).astype(int)
-        Pg = _np.asarray(Gv.P_gas.X); ug = _np.round(Gv.u_gas.X).astype(int)
-        Pn = _np.asarray(Nv.P_nuc.X)
-        Pb = _np.asarray(Bv.P_bio.X)
-        Pw = _np.asarray(Sv.P_wind.X); Ppv = _np.asarray(Sv.P_pv.X)
-        Pwc = _np.asarray(Sv.P_wind_curt.X); Ppc = _np.asarray(Sv.P_pv_curt.X)
-        Psh = _np.asarray(Sv.P_shed.X)
-        Pso = _np.asarray(Sv.P_shift_out.X); Psi = _np.asarray(Sv.P_shift_in.X)
-        Pct = _np.asarray(Sv.P_cut.X)
-        Pps_gen = _np.asarray(Pv.P_ps_gen.X); Pps_pump = _np.asarray(Pv.P_ps_pump.X)
-        Eps = _np.asarray(Pv.E_ps.X)
-        Pes_ch = _np.asarray(Ev.P_es_charge.X); Pes_dis = _np.asarray(Ev.P_es_discharge.X)
-        Ees = _np.asarray(Ev.E_es.X)
-        Phr = _np.asarray(Hv.P_hyd_ror.X); Phs = _np.asarray(Hv.P_hyd_res.X)
-        Rhy = _np.asarray(Hv.R_hyd_hot.X); Ehc = _np.asarray(Hv.E_hyd_curt.X)
-        Pfw = _np.asarray(Fv.P_fr_wind_out.X); Pfp = _np.asarray(Fv.P_fr_pv_out.X)
-        Pfc = _np.asarray(Fv.P_fr_charge.X); Pfd = _np.asarray(Fv.P_fr_discharge.X)
-        Ef = _np.asarray(Fv.E_fr.X)
-
-        # ---- 合并时序 CSV：每列一条曲线，列名与 m 文件"七、结果文件导出"段逐字符一致 ----
-        # E 类取每小时末值（丢第 0 列初值，初值是输入回显两边恒等）；E_hyd_curt 是
-        # 周期量 → 常量列；空设备不生成列；数值双精度原样落盘（不四舍五入，
-        # 舍入噪声累加会污染 compare 的 1e-6 硬门槛）。
-        cols = {"Time": [ts.strftime("%Y-%m-%d %H:%M") for ts in inp.Time]}
-
-        def _acols(prefix, X):        # 分区级列 {prefix}_{AreaID}
-            for r in range(inp.Narea):
-                cols[f"{prefix}_{inp.AreaID[r]}"] = _np.asarray(X)[r]
-
-        def _ucols(prefix, keys, X, skip=0):   # 机组级列 {prefix}_{UnitKey}；skip=1 丢 E 初值列
-            for k, row in zip(keys, _np.asarray(X)):
-                cols[f"{prefix}_{k}"] = _np.asarray(row)[skip:]
-
-        _acols("P_load", inp.P_load)
-        _ucols("P_th", coal.UnitKey_th, P); _ucols("u_th", coal.UnitKey_th, u)
-        _ucols("P_gas", gas.UnitKey_gas, Pg); _ucols("u_gas", gas.UnitKey_gas, ug)
-        _ucols("P_nuc", nuc.UnitKey_nuc, Pn); _ucols("P_bio", bio.UnitKey_bio, Pb)
-        for prefix, X in [("P_wind", Pw), ("P_pv", Ppv), ("P_wind_curt", Pwc),
-                          ("P_pv_curt", Ppc), ("P_shed", Psh), ("P_shift_out", Pso),
-                          ("P_shift_in", Psi), ("P_cut", Pct)]:
-            _acols(prefix, X)
-        _ucols("P_ps_gen", ps.UnitKey_ps, Pps_gen); _ucols("P_ps_pump", ps.UnitKey_ps, Pps_pump)
-        _ucols("E_ps", ps.UnitKey_ps, Eps, skip=1)
-        _ucols("P_es_charge", es.UnitKey_es, Pes_ch)
-        _ucols("P_es_discharge", es.UnitKey_es, Pes_dis)
-        _ucols("E_es", es.UnitKey_es, Ees, skip=1)
-        _ucols("P_hyd_ror", hyd.UnitKey_ror, Phr); _ucols("P_hyd_res", hyd.UnitKey_res, Phs)
-        _ucols("R_hyd_hot", hyd.UnitKey_res, Rhy)
-        for k in range(hyd.N_hyd_period):     # 周期量常量列：E_hyd_curt_{机组}_{年月}
-            key = hyd.UnitKey_res[hyd.hydPeriodUnit[k]]
-            ym = inp.Time[hyd.hydPeriodHours[k][0]].strftime("%Y%m")
-            cols[f"E_hyd_curt_{key}_{ym}"] = _np.full(inp.T, Ehc[k, 0])
-        _ucols("P_fr_wind_out", fr.UnitKey_fr, Pfw); _ucols("P_fr_pv_out", fr.UnitKey_fr, Pfp)
-        _ucols("P_fr_charge", fr.UnitKey_fr, Pfc); _ucols("P_fr_discharge", fr.UnitKey_fr, Pfd)
-        _ucols("E_fr", fr.UnitKey_fr, Ef, skip=1)
-        pd.DataFrame(cols).to_csv(config.RESULT_DIR / f"时序结果_T{inp.T}.csv",
-                                  index=False, encoding="utf-8")
-        print("已导出: %s" % (config.RESULT_DIR / f"时序结果_T{inp.T}.csv"))
-        # 绘图曲线 CSV（前端复现 设备运行_*.png）：plot 顶部 import solve，须函数内延迟导入
-        import plot as PL
-        PL.write_chart_csv(inp, coal, gas, nuc, bio, ps, es, hyd, fr,
-                           Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv)
-        # 平衡残差 = 发电 + 储能净出力 + 净受入 + 失负荷 − 响应后负荷（MATLAB 1178）
-        A_th = _np.zeros((inp.Narea, coal.N_th)); A_th[coal.area_th, _np.arange(coal.N_th)] = 1
-        A_gas = _np.zeros((inp.Narea, gas.N_gas)); A_gas[gas.area_gas, _np.arange(gas.N_gas)] = 1
-        A_nuc = _np.zeros((inp.Narea, nuc.N_nuc)); A_nuc[nuc.area_nuc, _np.arange(nuc.N_nuc)] = 1
-        A_bio = _np.zeros((inp.Narea, bio.N_bio)); A_bio[bio.area_bio, _np.arange(bio.N_bio)] = 1
-        A_ps = _np.zeros((inp.Narea, ps.N_ps)); A_ps[ps.area_ps, _np.arange(ps.N_ps)] = 1
-        A_es = _np.zeros((inp.Narea, es.N_es)); A_es[es.area_es, _np.arange(es.N_es)] = 1
-        A_hyd_ror = _np.zeros((inp.Narea, hyd.N_hyd_ror)); A_hyd_ror[hyd.area_hyd_ror, _np.arange(hyd.N_hyd_ror)] = 1
-        A_hyd_res = _np.zeros((inp.Narea, hyd.N_hyd_res)); A_hyd_res[hyd.area_hyd_res, _np.arange(hyd.N_hyd_res)] = 1
-        A_fr = _np.zeros((inp.Narea, fr.N_fr)); A_fr[fr.area_fr, _np.arange(fr.N_fr)] = 1
-        A_line = _np.zeros((inp.Narea, inp.N_line))
-        A_line[inp.line_from, _np.arange(inp.N_line)] = -1
-        A_line[inp.line_to, _np.arange(inp.N_line)] = 1
-        P_G = A_th @ P + A_gas @ Pg + A_nuc @ Pn + A_bio @ Pb \
-            + A_hyd_ror @ Phr + A_hyd_res @ Phs \
-            + _np.asarray(Sv.P_wind.X) + _np.asarray(Sv.P_pv.X) \
-            + A_fr @ (Pfw + Pfp + Pfd)                              # MATLAB 981（P_fr 展开项）
-        P_sto = (A_es @ Pes_dis - A_es @ Pes_ch + A_ps @ (Pps_gen - Pps_pump))  # MATLAB 974
-        P_tr = A_line @ _np.asarray(Sv.P_line.X)
-        P_D = inp.P_load - _np.asarray(Sv.P_shift_out.X) + _np.asarray(Sv.P_shift_in.X) \
-            - _np.asarray(Sv.P_cut.X)
-        resid = P_G + P_sto + P_tr + _np.asarray(Sv.P_shed.X) - P_D
-        print("功率平衡残差 max: %.3g MW（MATLAB 1178 行同款自检，应≈0）"
-              % _np.abs(resid).max())
-
-        # ---- 新指标（MATLAB 1181-1190）----
-        Psh = _np.asarray(Sv.P_shed.X)
-        # P_RE_available/P_RE_curt 与 context 3.16 同式：省级聚合含 fr 项（全数据/解值）
-        A_prov = _np.zeros((inp.Nprovince, inp.Narea))
-        A_prov[inp.areaProvince, _np.arange(inp.Narea)] = 1
-        RE_avail = A_prov @ (inp.P_wind_available + inp.P_pv_available
-                             + A_fr @ (fr.P_fr_wind_available
-                                       + fr.P_fr_pv_available))     # 992 同式
-        RE_curt = A_prov @ (_np.asarray(Sv.P_wind_curt.X)
-                            + _np.asarray(Sv.P_pv_curt.X)
-                            + A_fr @ (_np.asarray(Fv.P_fr_wind_curt.X)
-                                      + _np.asarray(Fv.P_fr_pv_curt.X)))   # 993 同式
-        REAvailableEnergy = RE_avail.sum(axis=1) * inp.Delta_t       # 1181
-        RECurtailedEnergy = RE_curt.sum(axis=1) * inp.Delta_t        # 1182
-        utilization = _np.full(inp.Nprovince, _np.nan)               # 1183：无风光能量时无定义
-        hasRE = REAvailableEnergy > 0
-        utilization[hasRE] = 1 - RECurtailedEnergy[hasRE] / REAvailableEnergy[hasRE]  # 1185
-        EnergyNotServed = Psh.sum() * inp.Delta_t                    # 1187 未供电量，MWh
-        LossOfLoadHours = float((Psh > 1e-4).any(axis=0).sum()) * inp.Delta_t   # 1188
-        MaxLoadShortfall = Psh.sum(axis=0).max()                     # 1189 全省最大同时缺口，MW
-        print("新能源利用率：%.2f%%，弃风光电量：%.3f MWh，失负荷：%.3f MWh"
-              % (100 * utilization[0], RECurtailedEnergy.sum(), EnergyNotServed))  # 1186
-        print("缺电小时：%.0f h，最大缺口：%.3f MW" % (LossOfLoadHours, MaxLoadShortfall))  # 1190
-
-        # ---- 结果.json（服务/前端口径；report 19 字段对齐上游验证 json）----
-        # 5 项本侧定义（m 文件无 report 段）：CO2_t=1001 同式总量、热/冷备用裕度=
-        # 各对自身比例约束(1005/1006)的最小富余、储能闭合=max|E末−E初|、
-        # 最小约束残差=Gurobi Slack 全约束最小值（负值=数值越界）
-        series = {
-            "P_th": _json_series(coal.UnitKey_th, P), "u_th": _json_series(coal.UnitKey_th, u),
-            "P_gas": _json_series(gas.UnitKey_gas, Pg), "u_gas": _json_series(gas.UnitKey_gas, ug),
-            "P_nuc": _json_series(nuc.UnitKey_nuc, Pn), "P_bio": _json_series(bio.UnitKey_bio, Pb),
-            "P_wind": _json_series(inp.AreaName, Sv.P_wind.X),
-            "P_pv": _json_series(inp.AreaName, Sv.P_pv.X),
-            "P_wind_curt": _json_series(inp.AreaName, Sv.P_wind_curt.X),
-            "P_pv_curt": _json_series(inp.AreaName, Sv.P_pv_curt.X),
-            "P_shed": _json_series(inp.AreaName, Sv.P_shed.X),
-            "P_shift_out": _json_series(inp.AreaName, Sv.P_shift_out.X),
-            "P_shift_in": _json_series(inp.AreaName, Sv.P_shift_in.X),
-            "P_cut": _json_series(inp.AreaName, Sv.P_cut.X),
-            "P_ps_gen": _json_series(ps.UnitKey_ps, Pps_gen),
-            "P_ps_pump": _json_series(ps.UnitKey_ps, Pps_pump),
-            "E_ps": _json_series(ps.UnitKey_ps, Eps),
-            "P_es_charge": _json_series(es.UnitKey_es, Pes_ch),
-            "P_es_discharge": _json_series(es.UnitKey_es, Pes_dis),
-            "E_es": _json_series(es.UnitKey_es, Ees),
-            "P_hyd_ror": _json_series(hyd.UnitKey_ror, Phr),
-            "P_hyd_res": _json_series(hyd.UnitKey_res, Phs),
-            "R_hyd_hot": _json_series(hyd.UnitKey_res, Rhy),
-            "E_hyd_curt": {   # 非 hour 网格：keys 即周期标签（机组·月），一行一值
-                "keys": [f"{hyd.UnitKey_res[i]}·{inp.Time[hrs[0]]:%Y-%m}"
-                         for i, hrs in zip(hyd.hydPeriodUnit, hyd.hydPeriodHours)],
-                "data": Ehc.tolist()},
-            "P_fr_wind_out": _json_series(fr.UnitKey_fr, Pfw),
-            "P_fr_pv_out": _json_series(fr.UnitKey_fr, Pfp),
-            "P_fr_charge": _json_series(fr.UnitKey_fr, Pfc),
-            "P_fr_discharge": _json_series(fr.UnitKey_fr, Pfd),
-            "E_fr": _json_series(fr.UnitKey_fr, Ef),
-        }
-        Rhot = A_prov @ (A_th @ Tv.R_th_hot.X + A_gas @ Gv.R_gas_hot.X
-                         + A_hyd_res @ Hv.R_hyd_hot.X + A_ps @ Pv.R_ps_hot.X
-                         + A_es @ Ev.R_es_hot.X)                                  # 1002 同式
-        Rcold = A_prov @ (A_th @ Tv.R_th_cold.X + A_gas @ Gv.R_gas_cold.X)       # 1003 同式
-        peak = inp.P_week_peak
-        hot_margin = float((Rhot - _np.repeat(inp.hotReserveRatio[:, None], inp.T, 1) * peak).min())
-        cold_margin = float((Rcold - _np.repeat(inp.coldReserveRatio[:, None], inp.T, 1) * peak).min())
-        # ---- 工作位置图（老版 27 列口径，全系统逐小时；列名/列序同老版 Excel）----
-        # 老版恒等式（青海 8760h 导出件实测）：发电曲线=修正后负荷+电网侧充电量
-        # （抽水/电储能充电；友好电站充电是站内行为、不从电网吸功率，不进电网侧）；
-        # 储能列为净值（放电正/充电负）。需求响应=原始负荷−修正后负荷（正=净削减）。
-        # 风电发电/光伏发电含友好电站直送，新型储能含友好电站放电（电网侧口径）。
-        # 缺项补 0：启停调峰气电/送电曲线/核电压出力/调峰不足（当前模型无对应量）、
-        # 弃水（月度电量口径在 series.E_hyd_curt，不造小时值）。
-        ZT = _np.zeros(inp.T)
-        th_min = (_np.asarray(coal.P_th_min)[:, None] * u).sum(axis=0)
-        gas_min = (_np.asarray(gas.P_gas_min)[:, None] * ug).sum(axis=0)
-        bio_min = (_np.asarray(bio.P_bio_min)[:, None] * (1 - bio.m_bio)).sum(axis=0)
-        ps_net = (Pps_gen - Pps_pump).sum(axis=0)
-        es_net = (Pes_dis - Pes_ch + Pfd).sum(axis=0)
-        PD_tot = P_D.sum(axis=0)
-        pc = {
-            "核电": Pn.sum(axis=0),
-            "煤电最小技术出力": th_min,
-            "生物质最小技术出力": bio_min,
-            "气电最小技术出力": gas_min,
-            "水电强迫": Phr.sum(axis=0),
-            "气电可调": Pg.sum(axis=0) - gas_min,
-            "煤电可调": P.sum(axis=0) - th_min,
-            "生物质可调": Pb.sum(axis=0) - bio_min,
-            "启停调峰气电": ZT,
-            "水电可调": Phs.sum(axis=0),
-            "风电发电": _np.asarray(Sv.P_wind.X).sum(axis=0) + Pfw.sum(axis=0),
-            "光伏发电": _np.asarray(Sv.P_pv.X).sum(axis=0) + Pfp.sum(axis=0),
-            "电量不足": Psh.sum(axis=0),
-            "抽水蓄能": ps_net,
-            "新型储能": es_net,
-            "发电曲线": PD_tot + Pps_pump.sum(axis=0) + Pes_ch.sum(axis=0),
-            "修正后负荷曲线": PD_tot,
-            "需求响应": inp.P_load.sum(axis=0) - PD_tot,
-            "送电曲线": ZT,
-            "本地负荷": inp.P_load.sum(axis=0),
-            "水火备用": _np.asarray(Tv.R_th_hot.X).sum(axis=0) + Rhy.sum(axis=0),
-            "旋转备用": Rhot.sum(axis=0),
-            "核电压出力": ZT,
-            "弃水": ZT,
-            "调峰不足": ZT,
-            "弃风": _np.asarray(Sv.P_wind_curt.X).sum(axis=0),
-            "弃光": _np.asarray(Sv.P_pv_curt.X).sum(axis=0),
-        }
-        # plot.py 102 行同款自检：堆叠正负项合计 ≈ 修正后负荷，漏列立刻报警
-        stack = (pc["核电"] + pc["煤电最小技术出力"] + pc["煤电可调"]
-                 + pc["生物质最小技术出力"] + pc["生物质可调"]
-                 + pc["气电最小技术出力"] + pc["气电可调"] + pc["水电强迫"]
-                 + pc["水电可调"] + pc["风电发电"] + pc["光伏发电"]
-                 + pc["抽水蓄能"] + pc["新型储能"] + pc["电量不足"])
-        assert _np.abs(stack - PD_tot).max() < 1e-3, \
-            "工作位置图堆叠合计≠修正后负荷：有列漏算"
-        position_chart = {k: _np.asarray(v).tolist() for k, v in pc.items()}
-        CO2_t = float(inp.Delta_t * (_np.asarray(Tv.CO2_th.X).sum()
-                       + (_np.asarray(gas.CO2_gas_factor)[:, None] * Pg).sum()))  # 1001 同式
-        closure = float(max(_np.abs(e[:, -1] - e[:, 0]).max(initial=0.0)
-                            for e in (Eps, Ees, Ef)))
-        try:
-            # Gurobi MIP 的 Slack 对所有方向统一 = rhs−activity（沙盒实测：≥ 约束
-            # 超额满足报负值），换算成"越界为负"的残差：≤ 取 slack、≥ 取 −slack、
-            # = 取 −|slack|，与上游 minimumConstraintResidual 同口径（应 ~1e-11）
-            sl = _np.array(m.getAttr("Slack", m.getConstrs()))
-            se = _np.array([c.Sense for c in m.getConstrs()])
-            min_residual = float(_np.where(se == ">", -sl,
-                                           _np.where(se == "=", -_np.abs(sl), sl)).min())
-        except gp.GurobiError:
-            min_residual = None    # MIP 解取不到 Slack 时不造数，置 null
-        report = {
-            "hours": inp.T, "startTime": str(inp.Time[0]), "endTime": str(inp.Time[-1]),
-            "scenario": config.HYDROLOGY_SCENARIO,
-            "problem": 0 if m.Status == gp.GRB.OPTIMAL else int(m.Status),   # YALMIP 口径 0=解出
-            "solverInfo": "Successfully solved (GUROBI)" if m.Status == gp.GRB.OPTIMAL
-                          else names.get(m.Status, str(m.Status)),
-            "solverSeconds": m.Runtime, "objectiveYuan": float(m.ObjVal),
-            "balanceErrorMW": float(_np.abs(resid).max()),
-            "minimumConstraintResidual": min_residual,
-            "energyNotServedMWh": float(EnergyNotServed),
-            "lossOfLoadHours": float(LossOfLoadHours),
-            "maxLoadShortfallMW": float(MaxLoadShortfall),
-            "renewableUtilization": float(utilization[0]),   # 1186 打印同口径取首省
-            "CO2_t": CO2_t, "hotReserveMarginMW": hot_margin,
-            "coldReserveMarginMW": cold_margin,
-            "maxStorageClosureErrorMWh": closure,
-            "mipGap": float(m.getAttr("MIPGap")),
-        }
-        _write_result_json(config.RESULT_DIR / "结果.json", inp, report, series,
-                           position_chart)
-        print("已导出: %s" % (config.RESULT_DIR / "结果.json"))
-    return m, coal, gas, nuc, bio, ps, es, hyd, fr, Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv
+              % (m.ObjVal, cost_exprs["constants"], 100 * gap, m.Runtime))
+        solution = extract_all(m, inp, coal, gas, nuc, bio, ps, es, hyd, fr,
+                               Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv, cost_exprs)
+        write_timeseries_csv(inp, solution)
+        return solution
+    raise RuntimeError(f"求解无可行解（{names.get(m.Status, m.Status)}），"
+                       f"日志: {config.RESULT_DIR / ('gurobi_py_T%d.log' % inp.T)}")
 
 
 if __name__ == "__main__":
     import time
     t0 = time.perf_counter()
     inp = reader.load_inputs()
-    m, coal, gas, nuc, bio, ps, es, hyd, fr, Tv, \
-        Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv = solve(inp)
-    if m.SolCount > 0:                                   # 无可行解不出图（对齐 plot.main 的判断）
+    solution = solve(inp)
+    if solution.four_items["objective"]["value"] is not None:
+        metrics = compute_metrics(inp, solution)
+        write_result_json(inp, solution, config, metrics)
         import plot as PL                                 # 放 __main__ 里延迟导入，避免和 plot.py 顶部的 import solve 循环
         PL.plt.rcParams["font.family"] = ["Microsoft YaHei"]   # 汉字字体，plot.main 原有设置
         PL.plt.rcParams["axes.unicode_minus"] = False
-        PL.plot_operation(inp, coal, gas, nuc, bio, ps, es, hyd, fr,
-                          Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv, save_png=True)
+        PL.plot_operation(inp, solution, save_png=True)   # 先出 00 堆叠图源
+        PL.write_chart_csv(inp, solution)
+        import analysis_export as AE                      # MATLAB 十二节同位（此时 00 源图已就绪）
+        AE.export_analysis(inp, solution, metrics)
     print("---- 本次配置 ----")
     print("时段数 T=%d  起始 %s  步长 %g h  水文情景 %s"
           % (config.T, config.START_TIME, config.DELTA_T, config.HYDROLOGY_SCENARIO))

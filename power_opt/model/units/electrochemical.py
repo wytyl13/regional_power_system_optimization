@@ -25,6 +25,7 @@ class ESInputs:
     """MATLAB 1.16 节工作区变量的镜像；变量名与 MATLAB 一致。"""
     N_es: int
     UnitKey_es: list
+    name_es: list                # 机组名（八~十一节分析表用，MATLAB esData.NAME）
     area_es: np.ndarray           # 机组 → 分区（0 基，AreaID 列）
     P_es_max: np.ndarray          # MW
     E_es_max: np.ndarray; E_es_min: np.ndarray; E_es_upper: np.ndarray
@@ -41,7 +42,7 @@ def load_es(inp: Inputs) -> ESInputs:
     req_es = ["UnitKey", "AreaID", "CAP", "ENERGY_MWH", "SOC_MIN", "SOC_MAX",
               "SOC_INITIAL", "ETA_CHARGE", "ETA_DISCHARGE", "SELF_DISCHARGE",
               "POWER_COST", "ENERGY_COST", "REPLACE_FACTOR", "MAX_CYCLES",
-              "FOM_COST_PERIOD", "FOM_ENERGY_PERIOD"]
+              "FOM_COST_PERIOD", "FOM_ENERGY_PERIOD", "NAME"]
     esData = _read(config.UNIT_FILE, "电化学储能", req_es)
     N_es = len(esData)
     zone_es = [_zstr(v) for v in esData["AreaID"]]
@@ -51,6 +52,7 @@ def load_es(inp: Inputs) -> ESInputs:
     area_es = np.array([areaPos[z] for z in zone_es], dtype=int)
     f = lambda c: esData[c].to_numpy(float)
     UnitKey_es = esData["UnitKey"].astype(str).tolist()
+    name_es = esData["NAME"].astype(str).tolist()                 # 八~十一节分析表用
     P_es_max = f("CAP"); E_es_max = f("ENERGY_MWH")
     E_es_min = E_es_max * f("SOC_MIN")                    # MATLAB 384
     E_es_upper = E_es_max * f("SOC_MAX")                  # 385
@@ -70,7 +72,7 @@ def load_es(inp: Inputs) -> ESInputs:
             raise ValueError(f"{name} 含 NaN/Inf，检查电储能输入表")
 
     return ESInputs(
-        N_es=N_es, UnitKey_es=UnitKey_es, area_es=area_es, P_es_max=P_es_max,
+        N_es=N_es, UnitKey_es=UnitKey_es, name_es=name_es, area_es=area_es, P_es_max=P_es_max,
         E_es_max=E_es_max, E_es_min=E_es_min, E_es_upper=E_es_upper,
         E_es_initial=E_es_initial, eta_es_ch=eta_es_ch, eta_es_dis=eta_es_dis,
         loss_es=loss_es, c_es_degrade=c_es_degrade, c_es_FOM=c_es_FOM,

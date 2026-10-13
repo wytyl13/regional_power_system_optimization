@@ -26,6 +26,7 @@ class PSInputs:
     """MATLAB 1.5 节工作区变量的镜像；变量名与 MATLAB 一致。"""
     N_ps: int
     UnitKey_ps: list
+    name_ps: list                # 机组名（八~十一节分析表用，MATLAB psData.NAME）
     area_ps: np.ndarray           # 机组 → 分区（0 基）
     P_ps_max: np.ndarray
     m_ps: np.ndarray              # 检修：1 检修，0 可用（N_ps×T）
@@ -46,7 +47,7 @@ def load_ps(inp: Inputs) -> PSInputs:
 
     req_ps = ["UnitKey", "SUBSTR(C.ID，12)", "CAP", "PUMP_MIN_MW", "MAX_POWER_CHARGE",
               "GEN_AFFI_FACTOR", "CHAEGE_AFFI_FACTOR", "ENERGY_MWH",
-              "SOC_MIN", "SOC_MAX", "SOC_INITIAL", "FOM_COST_PERIOD"]
+              "SOC_MIN", "SOC_MAX", "SOC_INITIAL", "FOM_COST_PERIOD", "NAME"]
     psData = _read(config.UNIT_FILE, "抽水蓄能", req_ps)
     N_ps = len(psData)
     zone_ps = [_zstr(v) for v in psData["SUBSTR(C.ID，12)"]]
@@ -56,6 +57,7 @@ def load_ps(inp: Inputs) -> PSInputs:
     area_ps = np.array([areaPos[z] for z in zone_ps], dtype=int)
     f = lambda c: psData[c].to_numpy(float)
     UnitKey_ps = psData["UnitKey"].astype(str).tolist()
+    name_ps = psData["NAME"].astype(str).tolist()                 # 八~十一节分析表用
     P_ps_max = f("CAP")
     P_ps_pump_min = f("PUMP_MIN_MW"); P_ps_pump_max = f("MAX_POWER_CHARGE")
     eta_ps_gen = f("GEN_AFFI_FACTOR"); eta_ps_pump = f("CHAEGE_AFFI_FACTOR")
@@ -79,7 +81,7 @@ def load_ps(inp: Inputs) -> PSInputs:
             raise ValueError(f"{name} 含 NaN/Inf，检查抽蓄输入表")
 
     return PSInputs(
-        N_ps=N_ps, UnitKey_ps=UnitKey_ps, area_ps=area_ps, P_ps_max=P_ps_max,
+        N_ps=N_ps, UnitKey_ps=UnitKey_ps, name_ps=name_ps, area_ps=area_ps, P_ps_max=P_ps_max,
         m_ps=m_ps, c_ps_FOM=c_ps_FOM, P_ps_pump_min=P_ps_pump_min,
         P_ps_pump_max=P_ps_pump_max, eta_ps_gen=eta_ps_gen, eta_ps_pump=eta_ps_pump,
         E_ps_max=E_ps_max, SOC_ps_min=SOC_ps_min, SOC_ps_max=SOC_ps_max,

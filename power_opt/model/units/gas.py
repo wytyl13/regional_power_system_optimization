@@ -27,6 +27,7 @@ class GasInputs:
     """MATLAB 1.4 节工作区变量的镜像；变量名与 MATLAB 一致。"""
     N_gas: int
     UnitKey_gas: list
+    name_gas: list                # 机组名（八~十一节分析表用，MATLAB gasData.NAME）
     area_gas: np.ndarray           # 机组 → 分区（0 基）
     P_gas_rated: np.ndarray        # 额定容量，仅固定运维基数（MATLAB 137）
     P_gas_max: np.ndarray; P_gas_min: np.ndarray
@@ -52,7 +53,7 @@ def load_gas(inp: Inputs) -> GasInputs:
                "COST_START_UP", "COST_SHUT_DOWN", "GEN_COST", "INIT_POWER",
                "RAMP_LIMIT_UP", "RAMP_LIMIT_DOWN", "START_RAMP", "STOP_RAMP",
                "CO2_FACTOR", "MIN_UP_TIME", "MIN_DOWN_TIME", "INIT_HOURS",
-               "FOM_COST_PERIOD"]
+               "FOM_COST_PERIOD", "NAME"]
     gasData = _read(config.UNIT_FILE, "气电", req_gas)
     N_gas = len(gasData)
     zone_gas = [_zstr(v) for v in gasData["SUBSTR(C.ID，12)"]]
@@ -62,6 +63,7 @@ def load_gas(inp: Inputs) -> GasInputs:
     area_gas = np.array([areaPos[z] for z in zone_gas])
     f = lambda c: gasData[c].to_numpy(float)
     UnitKey_gas = gasData["UnitKey"].astype(str).tolist()
+    name_gas = gasData["NAME"].astype(str).tolist()               # 八~十一节分析表用
     # MATLAB 137-138：额定容量只作固定运维基数；出力上限=额定×(1-受阻率)
     P_gas_rated = f("CAP")
     P_gas_max = P_gas_rated * (1.0 - f("DERATE_RATE")); P_gas_min = f("MIN_POWER_GEN")
@@ -97,7 +99,7 @@ def load_gas(inp: Inputs) -> GasInputs:
             raise ValueError(f"{name} 含 NaN/Inf，检查气电输入表")
 
     return GasInputs(
-        N_gas=N_gas, UnitKey_gas=UnitKey_gas, area_gas=area_gas,
+        N_gas=N_gas, UnitKey_gas=UnitKey_gas, name_gas=name_gas, area_gas=area_gas,
         P_gas_rated=P_gas_rated,
         P_gas_max=P_gas_max, P_gas_min=P_gas_min, m_gas=m_gas, c_gas_FOM=c_gas_FOM,
         u_gas_0=u_gas_0, c_gas_start=c_gas_start, c_gas_stop=c_gas_stop,

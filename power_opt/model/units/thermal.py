@@ -24,6 +24,7 @@ class CoalInputs:
     """MATLAB 1.3 节工作区变量的镜像；变量名与 MATLAB 一致。"""
     N_th: int
     UnitKey_th: list
+    name_th: list                # 机组名（八~十一节分析表用，MATLAB thData.NAME）
     area_th: np.ndarray            # 机组 → 分区（0 基）
     P_th_rated: np.ndarray         # 额定容量，仅固定运维基数（MATLAB 81）
     P_th_max: np.ndarray; P_th_min: np.ndarray
@@ -52,7 +53,7 @@ def load_coal(inp: Inputs) -> CoalInputs:
               "COST_START_UP", "COST_SHUT_DOWN", "COST_A", "COST_B", "COST_C",
               "MIN_UP_TIME", "MIN_DOWN_TIME", "INIT_HOURS", "INIT_POWER",
               "RAMP_LIMIT_UP", "RAMP_LIMIT_DOWN", "START_RAMP", "STOP_RAMP",
-              "FOM_COST_PERIOD", "SO2_FACTOR", "NOX_FACTOR", "DUST_FACTOR"]
+              "FOM_COST_PERIOD", "SO2_FACTOR", "NOX_FACTOR", "DUST_FACTOR", "NAME"]
     thData = _read(config.UNIT_FILE, "煤电", req_th)
     N_th = len(thData)
     zone_th = [_zstr(v) for v in thData["SUBSTR(C.ID，12)"]]
@@ -62,6 +63,7 @@ def load_coal(inp: Inputs) -> CoalInputs:
     area_th = np.array([areaPos[z] for z in zone_th])
     f = lambda c: thData[c].to_numpy(float)
     UnitKey_th = thData["UnitKey"].astype(str).tolist()
+    name_th = thData["NAME"].astype(str).tolist()                 # 八~十一节分析表用
     # MATLAB 81-82：额定容量只作固定运维基数；出力上限=额定×(1-受阻率)
     P_th_rated = f("CAP")
     P_th_max = P_th_rated * (1.0 - f("DERATE_RATE")); P_th_min = f("MIN_POWER_GEN")
@@ -114,7 +116,7 @@ def load_coal(inp: Inputs) -> CoalInputs:
             raise ValueError(f"{name} 含 NaN/Inf，检查煤电输入表")
 
     return CoalInputs(
-        N_th=N_th, UnitKey_th=UnitKey_th, area_th=area_th,
+        N_th=N_th, UnitKey_th=UnitKey_th, name_th=name_th, area_th=area_th,
         P_th_rated=P_th_rated,
         P_th_max=P_th_max, P_th_min=P_th_min, m_th=m_th, c_th_FOM=c_th_FOM,
         u_th_0=u_th_0, c_th_start=c_th_start, c_th_stop=c_th_stop,

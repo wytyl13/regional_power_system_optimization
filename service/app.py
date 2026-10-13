@@ -34,6 +34,7 @@ from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from assemble import build_analysis
 from convert import _included, convert
 from defaults import FIELDS_MAPPING, merge_config
 from parse_template import parse_template
@@ -46,7 +47,9 @@ JOBS_DIR = HERE / "results" / "jobs"
 sys.path.insert(0, str(HERE.parent / "power_opt"))
 import config as po_config      # power_opt/config.py（方案A：任务前设属性）
 import reader as po_reader
+import solution as po_solution  # power_opt/solution.py（结果.json + 指标组装）
 from solve import solve as po_solve
+from analysis_export import build_views as po_build_views  # 前端 views 块（与 PNG 同口径）
 import gurobipy as gp
 
 app = FastAPI(title="区域电力系统优化")
@@ -318,21 +321,21 @@ def _run_job(job_id: str):
     po_config.RESULT_DIR = job_dir
 
     inp = po_reader.load_inputs()
-    m, *_ = po_solve(inp)
-    four = {   # 四项核对（solve 已打印进 stdout，此处从模型对象直取进服务响应）
-        "variables": {"count": m.NumVars, "binary": m.NumBinVars},
-        "constraints": {"rows": m.NumConstrs, "nonzeros": m.getAttr("NumNZs")},
-        "status": STATUS_NAMES.get(m.Status, str(m.Status)),
-        "objective": {"value": float(m.ObjVal) if m.SolCount else None,
-                      "mipGapPct": 100 * float(m.getAttr("MIPGap")) if m.SolCount else None,
-                      "runtime_s": m.Runtime},
-    }
+    solution = po_solve(inp)
+    four = solution.four_items
     job["fourItems"] = four
-    if m.SolCount == 0:
+    if four["objective"]["value"] is None:
         raise RuntimeError(f"求解无可行解（{four['status']}），"
                            f"日志: {po_config.RESULT_DIR / ('gurobi_py_T%d.log' % inp.T)}")
+    # 结果.json 与派生指标在算法侧组装（power_opt/solution.py），服务层只读
+    metrics = po_solution.compute_metrics(inp, solution)
+    po_solution.write_result_json(inp, solution, po_config, metrics)
     result = json.loads((po_config.RESULT_DIR / "结果.json").read_text(encoding="utf-8"))
     job["report"] = result["report"]
+    result["analysis"] = build_analysis(inp, solution)
+    # views：前端唯一渲染入口（9 tab：{title,note?,panels[]}，panel type 4 种）。
+    # 只进内存 solution.json，结果.json 落盘件不动 → T24 对拍件不破坏
+    result["views"] = po_build_views(inp, solution)
     solution = {"jobId": job_id, "datasetId": job["datasetId"],
                 "area": ds["area"], "year": ds["year"],
                 "submittedAt": job["submittedAt"], "finishedAt": _now(),

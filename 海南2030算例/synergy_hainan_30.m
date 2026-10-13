@@ -47,7 +47,7 @@ useInterprovincial = false;               % 省间互济：需两端省份完整
 useFixedTransfer = false;                 % 是否计入既定跨区送电
 solverName = 'gurobi';
 solverTimeLimit = 1800;                    % Gurobi求解时限，s；不含前面的读取与建模
-solverMIPGap = 1e-3;
+solverMIPGap = 0.99;
 
 % 直接按表头读取，不调用数据审查，不补造缺失列。
 % 浅黄色为可编辑输入；已补数参数的来源、口径和假设见表内说明，空白不自动当作0。
@@ -1102,6 +1102,8 @@ options.gurobi.MIPFocus = 1;               % 优先寻找整数可行运行方�
 options.gurobi.Heuristics = 0.2;           % 分配更多搜索时间给可行解启发式
 options.gurobi.MIPGap = solverMIPGap;
 options.gurobi.DualReductions = 0;         % 清楚区分不可行与无界，便于解释数据情景
+options.gurobi.Threads = 1;                % 单线程锁定多最优解，与 Python solve.py 镜像
+options.gurobi.Seed = 0;                   % 显式固定随机种子（默认即 0，防御性声明）
 options.gurobi.LogFile = fullfile(inputDir,'gurobi_hainan_last.log'); % 保留预处理、界限和可行解日志
 options.savesolveroutput = 1;              % 保留原始求解状态，区分超时与不可行
 solution = optimize(Constraints, Objective, options);

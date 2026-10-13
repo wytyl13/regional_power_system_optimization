@@ -22,7 +22,7 @@ START_TIME = "2030-01-01 00:00"
 DELTA_T = 1.0
 HYDROLOGY_SCENARIO = "平水年"  # 水文情景，镜像 MATLAB 41 行；可改"枯水年"
 
-MIGAP = 1e-3
+MIGAP = 1e-2
 TIME_LIMIT = 1800
 # 以下三项镜像 MATLAB 1165-1168（优先找可行解、区分不可行/无界）
 MIP_FOCUS = 1
