@@ -4,13 +4,14 @@
 @File    :app.py
 FastAPI 服务骨架（docs/服务接口设计方案.md）：
   POST /api/datasets                     上传模版 → datasetId + categories + config + fixedParams
+                                         不传 file → 只返回 config + fixedParams（默认配置）
   GET  /api/datasets/{id}/curves/{sheet}  曲线懒加载（按 filterBy 键值筛，服务端规则收口）
   POST /api/jobs                         提交计算（datasetId + config）→ jobId
   GET  /api/jobs                         任务列表（内存实时态 + 落盘历史，新→旧）
   GET  /api/jobs/{jobId}                 状态 queued/running/solved/failed（solved 含四项核对）
   GET  /api/jobs/{jobId}/results         取 solution.json
-方案A：power_opt 零源码改动——调 solver 前直接设置其 config 模块属性
-（reader.py 与 model/units 均在调用时才读 config；单队列单 worker 串行，无并发写）。
+算法调用走显式接口：power_opt/run.py（RunConfig + run_with_outputs），
+经 service/assemble.py 转发（power_opt 路径注入收口在那里），服务不直接摸算法模块。
 运行：service/ 目录下 `uvicorn app:app --port 8000`（勿用 --reload，会双开 worker 线程）。
 """
 from __future__ import annotations
@@ -35,23 +36,18 @@ from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from assemble import build_analysis
+from assemble import (RunConfig, build_analysis, po_build_views,
+                      po_last_result_dir, po_run)
 from convert import _included, convert
 from defaults import FIXED_PARAMS, build_form, merge_config
 from parse_template import parse_template
+from shared.errors import (ConflictError, NotFoundError, ValidationError,
+                           install_handlers)
 from tree import build_categories, read_curve
 
 HERE = Path(__file__).resolve().parent
 DATASETS_DIR = HERE / "datasets"
 JOBS_DIR = HERE / "results" / "jobs"
-
-sys.path.insert(0, str(HERE.parent / "power_opt"))
-import config as po_config      # power_opt/config.py（方案A：任务前设属性）
-import reader as po_reader
-import solution as po_solution  # power_opt/solution.py（结果.json + 指标组装）
-from solve import solve as po_solve
-from analysis_export import build_views as po_build_views  # 前端 views 块（与 PNG 同口径）
-import gurobipy as gp
 
 app = FastAPI(title="区域电力系统优化")
 app.add_middleware(   # 跨域放行（开发期全放；上线改 allow_origins 为前端域名列表）
@@ -60,13 +56,11 @@ app.add_middleware(   # 跨域放行（开发期全放；上线改 allow_origins
     allow_methods=["*"],
     allow_headers=["*"],
 )
+install_handlers(app)   # BizError/ValueError → HTTPException，路由端点不写 try/except
 
 DATASETS: dict[str, dict] = {}      # datasetId → {path, parsed, area, year, uploadedAt}
 JOBS: dict[str, dict] = {}          # jobId → 状态（内存注册表，v1 不做重启持久化）
 QUEUE: "queue.Queue[str]" = queue.Queue()
-STATUS_NAMES = {gp.GRB.OPTIMAL: "OPTIMAL", gp.GRB.TIME_LIMIT: "TIME_LIMIT",
-                gp.GRB.INFEASIBLE: "INFEASIBLE", gp.GRB.UNBOUNDED: "UNBOUNDED",
-                gp.GRB.INTERRUPTED: "INTERRUPTED"}
 
 
 def _now() -> str:
@@ -76,8 +70,11 @@ def _now() -> str:
 # ============ POST /api/datasets ============
 
 @app.post("/api/datasets")
-async def upload_dataset(file: UploadFile):
-    if not file.filename or not file.filename.endswith(".xlsx"):
+async def upload_dataset(file: UploadFile | None = None):
+    if file is None or not file.filename:      # 不传 file → 只返回基础配置（无模版，无 datasetId）
+        return {"config": build_form(merge_config(None), ["平水年", "枯水年"]),
+                "fixedParams": FIXED_PARAMS}
+    if not file.filename.endswith(".xlsx"):
         raise HTTPException(400, "只接受 .xlsx 模版文件")
     ds_id = "ds_" + uuid.uuid4().hex[:12]
     ds_dir = DATASETS_DIR / ds_id
@@ -90,7 +87,7 @@ async def upload_dataset(file: UploadFile):
         categories = build_categories(str(path))
     except ValueError as e:
         shutil.rmtree(ds_dir, ignore_errors=True)
-        raise HTTPException(422, f"模版校验失败: {e}") from None
+        raise ValidationError(f"模版校验失败: {e}") from None
 
     year, p = parsed["year"], parsed
     warnings = []
@@ -144,11 +141,8 @@ def dataset_curve(ds_id: str, sheet: str, request: Request):
     """
     ds = DATASETS.get(ds_id)
     if ds is None:
-        raise HTTPException(404, f"dataset 不存在: {ds_id}")
-    try:
-        return read_curve(ds["path"], sheet, dict(request.query_params))
-    except ValueError as e:
-        raise HTTPException(422, str(e)) from None
+        raise NotFoundError(f"dataset 不存在: {ds_id}")
+    return read_curve(ds["path"], sheet, dict(request.query_params))   # 筛选失败 → ValueError → 422
 
 
 # ============ POST /api/jobs ============
@@ -201,10 +195,10 @@ def validate_config(ds: dict, user: dict) -> list[str]:
 def create_job(req: JobRequest):
     ds = DATASETS.get(req.datasetId)
     if ds is None:
-        raise HTTPException(404, f"dataset 不存在: {req.datasetId}")
+        raise NotFoundError(f"dataset 不存在: {req.datasetId}")
     problems = validate_config(ds, req.config)
     if problems:
-        raise HTTPException(422, "；".join(problems))
+        raise ValidationError("；".join(problems))
     job_id = "job_" + pd.Timestamp.now().strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:6]
     job_dir = JOBS_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -272,7 +266,7 @@ def list_jobs():
                 if s:
                     jobs.append(s)
     jobs.sort(key=lambda j: j.get("submittedAt") or "", reverse=True)   # 新→旧
-    return {"jobs": jobs}
+    return {"jobs": jobs[:5]}
 
 
 @app.get("/api/jobs/{job_id}")
@@ -282,7 +276,7 @@ def job_status(job_id: str):
         d = _job_dir(job_id)     # 历史任务（重启后内存态丢失），从盘上还原
         if d is not None:
             return _disk_summary(d, with_report=True)
-        raise HTTPException(404, f"job 不存在: {job_id}")
+        raise NotFoundError(f"job 不存在: {job_id}")
     out = {k: job[k] for k in ("jobId", "datasetId", "status", "submittedAt")
            if k in job}
     if "startedAt" in job:
@@ -303,11 +297,11 @@ def job_results(job_id: str):
     if job is not None:
         path = Path(job["jobDir"]) / "solution.json"
         if job["status"] != "solved" or not path.exists():
-            raise HTTPException(409, f"任务状态 {job['status']}，尚无结果")
+            raise ConflictError(f"任务状态 {job['status']}，尚无结果")
     else:
         d = _job_dir(job_id)     # 历史任务：有结果文件即可取
         if d is None or not (d / "solution.json").exists():
-            raise HTTPException(404, f"job 不存在: {job_id}")
+            raise NotFoundError(f"job 不存在: {job_id}")
         path = d / "solution.json"
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -322,34 +316,39 @@ def _run_job(job_id: str):
     summary = convert(ds["parsed"], job["userConfig"], job_dir)   # 三份中间表（配置注入）
 
     cfg = merge_config(job["userConfig"])
+    # 4 个模板浮出键不在 DEFAULT_CONFIG，按 convert 同语义补（用户未给 → 模板收资值），
+    # 与 /api/datasets 上传端点的 config 字段集对齐
+    p, u = ds["parsed"], job["userConfig"] or {}
+    cfg["province"]["hotReserveRatio"] = u.get("province", {}).get("hotReserveRatio", p["hotReserveRatio"])
+    cfg["province"]["coldReserveRatio"] = u.get("province", {}).get("coldReserveRatio", p["coldReserveRatio"])
+    cfg["demandResponse"]["shiftRatio"] = u.get("demandResponse", {}).get("shiftRatio", p["drShiftRatio"])
+    cfg["demandResponse"]["cutRatio"] = u.get("demandResponse", {}).get("cutRatio", p["drCutRatio"])
     sc = cfg["scenario"]
-    # 方案A：直接设 power_opt config 模块属性（reader/units 调用时才读）
-    po_config.T = sc["hours"]
-    po_config.START_TIME = sc["startTime"]
-    po_config.DELTA_T = 1.0
-    po_config.HYDROLOGY_SCENARIO = sc["hydrology"]
-    po_config.MIGAP = cfg["solver"]["mipGap"]
-    po_config.TIME_LIMIT = cfg["solver"]["timeLimit_s"]
-    po_config.USE_INTERPROVINCIAL = bool(sc["interprovincial"])
-    po_config.USE_FIXED_TRANSFER = bool(sc["interRegionTransfer"])
-    po_config.UNIT_FILE = job_dir / "分区机组信息表.xlsx"
-    po_config.SYSTEM_FILE = job_dir / "算例系统参数.xlsx"
-    po_config.PROFILE_FILE = job_dir / "运行数据.xlsx"
-    po_config.RESULT_DIR = job_dir
-
-    inp = po_reader.load_inputs()
-    solution = po_solve(inp)
+    # 显式接口：RunConfig 传参，算法包内自己落到 config（不再服务侧改写模块属性）
+    run_cfg = RunConfig(
+        unit_file=job_dir / "分区机组信息表.xlsx",
+        system_file=job_dir / "算例系统参数.xlsx",
+        profile_file=job_dir / "运行数据.xlsx",
+        result_dir=job_dir,
+        T=sc["hours"], start_time=sc["startTime"], delta_t=1.0,
+        hydrology=sc["hydrology"],
+        migap=cfg["solver"]["mipGap"], time_limit=cfg["solver"]["timeLimit_s"],
+        use_interprovincial=bool(sc["interprovincial"]),
+        use_fixed_transfer=bool(sc["interRegionTransfer"]),
+    )
+    solution, inp, metrics = po_run(run_cfg)
     four = solution.four_items
     job["fourItems"] = four
     if four["objective"]["value"] is None:
         raise RuntimeError(f"求解无可行解（{four['status']}），"
-                           f"日志: {po_config.RESULT_DIR / ('gurobi_py_T%d.log' % inp.T)}")
-    # 结果.json 与派生指标在算法侧组装（power_opt/solution.py），服务层只读
-    metrics = po_solution.compute_metrics(inp, solution)
-    po_solution.write_result_json(inp, solution, po_config, metrics)
-    result = json.loads((po_config.RESULT_DIR / "结果.json").read_text(encoding="utf-8"))
+                           f"日志: 见 {job_dir} 下 gurobi_py_T{inp.T}.log")
+    # 结果.json 已由 po_run 落盘；solve 会把 RESULT_DIR 指到时间戳子目录，
+    # 用显式取回函数拿真实落盘位置（不摸 config 全局态）
+    result = json.loads((po_last_result_dir() / "结果.json").read_text(encoding="utf-8"))
     job["report"] = result["report"]
     result["analysis"] = build_analysis(inp, solution)
+    # config：与 /api/datasets 下发的 config 同格式（build_form 表单结构），值为本次生效配置
+    result["config"] = build_form(cfg, sorted({k[1] for k in ds["parsed"]["hydroCurves"]}))
     # views：前端唯一渲染入口（9 tab：{title,note?,panels[]}，panel type 4 种）。
     # 只进内存 solution.json，结果.json 落盘件不动 → T24 对拍件不破坏
     result["views"] = po_build_views(inp, solution)
