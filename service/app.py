@@ -26,6 +26,7 @@ import traceback
 import uuid
 from collections import Counter
 from pathlib import Path
+from typing import Optional
 
 # 须在 import power_opt（连带 gurobipy/matplotlib）之前设好
 os.environ.setdefault("GRB_LICENSE_FILE", r"C:\gurobi1300\win64\bin\gurobi.lic")
@@ -70,7 +71,7 @@ def _now() -> str:
 # ============ POST /api/datasets ============
 
 @app.post("/api/datasets")
-async def upload_dataset(file: UploadFile | None = None):
+async def upload_dataset(file: Optional[UploadFile] = None):
     if file is None or not file.filename:      # 不传 file → 只返回基础配置（无模版，无 datasetId）
         return {"config": build_form(merge_config(None), ["平水年", "枯水年"]),
                 "fixedParams": FIXED_PARAMS}

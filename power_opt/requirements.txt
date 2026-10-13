@@ -4,3 +4,4 @@ openpyxl
 scipy
 pyarrow
 fastapi
+eval_type_backport
