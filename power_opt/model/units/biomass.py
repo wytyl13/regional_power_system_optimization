@@ -19,7 +19,7 @@ from dataclasses import dataclass
 import gurobipy as gp
 
 import config
-from reader import _read, _zstr, Inputs
+from power_opt.reader import _read, _zstr, Inputs
 
 
 @dataclass
@@ -42,7 +42,7 @@ class BiomassInputs:
 
 def load_biomass(inp: Inputs) -> BiomassInputs:
     """镜像 MATLAB 1.7 节（226-254）。缺列缺值即报错。"""
-    T = inp.T
+    T = inp.time.T
     mtn_bio = inp.maintenance[inp.maintenance["Type"].astype(str) == "生物质"]
 
     req_bio = ["UnitKey", "SUBSTR(C.ID，12)", "CAP", "DERATE_RATE", "MIN_POWER_GEN", "GEN_COST",
@@ -51,7 +51,7 @@ def load_biomass(inp: Inputs) -> BiomassInputs:
     bioData = _read(config.UNIT_FILE, "生物质", req_bio)
     N_bio = len(bioData)
     zone_bio = [_zstr(v) for v in bioData["SUBSTR(C.ID，12)"]]
-    areaPos = {a: i for i, a in enumerate(inp.AreaID)}
+    areaPos = {a: i for i, a in enumerate(inp.areas.AreaID)}
     if miss := [z for z in zone_bio if z not in areaPos]:
         raise KeyError(f"生物质分区编号 {set(miss)} 不在分区表中")
     area_bio = np.array([areaPos[z] for z in zone_bio])
@@ -60,21 +60,21 @@ def load_biomass(inp: Inputs) -> BiomassInputs:
     # MATLAB 235-236：额定容量只作固定运维基数；出力上限=额定×(1-受阻率)
     P_bio_rated = f("CAP")
     P_bio_max = P_bio_rated * (1.0 - f("DERATE_RATE")); P_bio_min = f("MIN_POWER_GEN")
-    c_bio_gen = inp.costScale * f("GEN_COST")
+    c_bio_gen = inp.econ.costScale * f("GEN_COST")
     P_bio_0 = f("INIT_POWER"); RU_bio = f("RAMP_LIMIT_UP"); RD_bio = f("RAMP_LIMIT_DOWN")
     SU_bio = f("START_RAMP"); SD_bio = f("STOP_RAMP")
     m_bio_0 = f("INIT_MAINTENANCE")
-    c_bio_FOM = inp.fixedCostScale * f("FOM_COST_PERIOD")
+    c_bio_FOM = inp.econ.fixedCostScale * f("FOM_COST_PERIOD")
     E_bio_limit = f("ENERGY_LIMIT_MWH")
 
     m_bio = np.zeros((N_bio, T))
     keyPos = {k: i for i, k in enumerate(UnitKey_bio)}
-    t_prev = inp.Time[0] - pd.Timedelta(hours=1)   # 起点前 1 小时（MATLAB 258）
+    t_prev = inp.time.Time[0] - pd.Timedelta(hours=1)   # 起点前 1 小时（MATLAB 258）
     for _, plan in mtn_bio.iterrows():
         key = str(plan["UnitKey"])
         if key not in keyPos:
             raise KeyError(f"检修计划机组 {key} 不在生物质表中（不猜、不忽略）")
-        periods = (inp.Time >= plan["StartTime"]) & (inp.Time < plan["EndTime"])
+        periods = (inp.time.Time >= plan["StartTime"]) & (inp.time.Time < plan["EndTime"])
         m_bio[keyPos[key], periods] = 1
         # MATLAB 258-261：起点前 1 小时已在检修窗口 → 初值覆盖为检修态、功率 0
         if plan["StartTime"] <= t_prev < plan["EndTime"]:
@@ -91,7 +91,7 @@ def load_biomass(inp: Inputs) -> BiomassInputs:
         P_bio_max=P_bio_max, P_bio_min=P_bio_min, m_bio=m_bio, c_bio_FOM=c_bio_FOM,
         c_bio_gen=c_bio_gen, P_bio_0=P_bio_0, RU_bio=RU_bio, RD_bio=RD_bio,
         SU_bio=SU_bio, SD_bio=SD_bio, m_bio_0=m_bio_0, E_bio_limit=E_bio_limit,
-        Delta_t=inp.Delta_t,
+        Delta_t=inp.time.Delta_t,
     )
 
 
@@ -155,7 +155,7 @@ def add_constraints(m: gp.Model, bio: BiomassInputs, var: BiomassVars) -> None:
 
 
 if __name__ == "__main__":
-    import reader
+    import power_opt.reader as reader
     inp = reader.load_inputs()
     bio = load_biomass(inp)
     print('输入自检: N_bio=%d, m_bio sum=%s, FOM常数=%.2f'

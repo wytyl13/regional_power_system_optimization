@@ -17,7 +17,7 @@ import gurobipy as gp
 from datetime import datetime
 
 import config
-import reader
+import power_opt.reader as reader
 from solution import (SolutionData, compute_metrics, extract_all,
                       write_result_json, write_timeseries_csv)
 from model.units import thermal as TH
@@ -53,9 +53,9 @@ def build(m: gp.Model, inp: reader.Inputs):
     Nv = NU.add_vars(m, nuc)
     Bv = BI.add_vars(m, bio)
     Pv = PS.add_vars(m, ps)
-    Ev = ES.add_vars(m, es, inp.T)
-    Hv = HY.add_vars(m, hyd, inp.T)
-    Fv = FR.add_vars(m, fr, inp.T)
+    Ev = ES.add_vars(m, es, inp.time.T)
+    Hv = HY.add_vars(m, hyd, inp.time.T)
+    Fv = FR.add_vars(m, fr, inp.time.T)
     Sv = CT.add_vars(m, inp)
     units = CT.RegisteredUnits(thermal=Tv, gas=Gv, nuclear=Nv, biomass=Bv,
                                pumped_storage=Pv, electrochemical=Ev, hydro=Hv,
@@ -65,9 +65,9 @@ def build(m: gp.Model, inp: reader.Inputs):
     NU.add_constraints(m, nuc, Nv)
     BI.add_constraints(m, bio, Bv)
     PS.add_constraints(m, ps, Pv, inp, Sv)
-    ES.add_constraints(m, es, Ev, inp, inp.T)
-    HY.add_constraints(m, hyd, Hv, inp, inp.T)
-    FR.add_constraints(m, fr, Fv, inp, inp.T)
+    ES.add_constraints(m, es, Ev, inp, inp.time.T)
+    HY.add_constraints(m, hyd, Hv, inp, inp.time.T)
+    FR.add_constraints(m, fr, Fv, inp, inp.time.T)
     CT.add_constraints(m, inp, Sv, units, coal, gas, nuc, bio, ps, es, hyd, fr)
     return coal, gas, nuc, bio, ps, es, hyd, fr, Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv, units
 
@@ -79,18 +79,19 @@ def add_objective(m: gp.Model, inp: reader.Inputs, coal: TH.CoalInputs,
                   Pv: PS.PSVars, Ev: ES.ESVars, Hv: HY.HydVars, Fv: FR.FrVars,
                   Sv: CT.SystemVars) -> dict:
     """MATLAB 4.1-4.14（1016-1094）一比一对照；返回成本表达式 dict 供取值
-    （六大项/十项分解对齐 MATLAB 1290-1312 行；海南无光热/互济，C_csp/C_inter=0）。"""
-    T, Delta_t = inp.T, inp.Delta_t
+    （六大项/十项分解对齐 MATLAB 1290-1312 行；海南无光热/互济，C_csp/C_inter=0）。
+    """
+    T, Delta_t = inp.time.T, inp.time.Delta_t
 
     # ---- 4.1 煤电（1016-1025）----
     C_th_fuel  = Delta_t * Tv.F_th.sum()                              # 1017
     C_th_start = _wsum(coal.c_th_start, Tv.v_th, T)                    # 1018
     C_th_stop  = _wsum(coal.c_th_stop, Tv.w_th, T)                     # 1019
     C_th_FOM   = float(np.sum(coal.c_th_FOM * coal.P_th_rated))        # 1020 常数，v2 基数=额定
-    C_th_CO2   = inp.c_CO2 * Delta_t * Tv.CO2_th.sum()                # 1021
-    C_th_SO2   = inp.c_SO2 * Delta_t * _wsum(coal.SO2_th_factor, Tv.P_th, T)    # 1022
-    C_th_NOX   = inp.c_NOX * Delta_t * _wsum(coal.NOX_th_factor, Tv.P_th, T)    # 1023
-    C_th_dust  = inp.c_dust * Delta_t * _wsum(coal.dust_th_factor, Tv.P_th, T)  # 1024
+    C_th_CO2   = inp.econ.c_CO2 * Delta_t * Tv.CO2_th.sum()                # 1021
+    C_th_SO2   = inp.econ.c_SO2 * Delta_t * _wsum(coal.SO2_th_factor, Tv.P_th, T)    # 1022
+    C_th_NOX   = inp.econ.c_NOX * Delta_t * _wsum(coal.NOX_th_factor, Tv.P_th, T)    # 1023
+    C_th_dust  = inp.econ.c_dust * Delta_t * _wsum(coal.dust_th_factor, Tv.P_th, T)  # 1024
     C_th = C_th_fuel + C_th_start + C_th_stop + C_th_FOM + \
         C_th_CO2 + C_th_SO2 + C_th_NOX + C_th_dust                    # 1025
 
@@ -99,7 +100,7 @@ def add_objective(m: gp.Model, inp: reader.Inputs, coal: TH.CoalInputs,
     C_gas_start = _wsum(gas.c_gas_start, Gv.v_gas, T)                   # 1029
     C_gas_stop  = _wsum(gas.c_gas_stop, Gv.w_gas, T)                    # 1030
     C_gas_FOM   = float(np.sum(gas.c_gas_FOM * gas.P_gas_rated))        # 1031 常数，v2 基数=额定
-    C_gas_CO2   = inp.c_CO2 * Delta_t * _wsum(gas.CO2_gas_factor, Gv.P_gas, T)  # 991+1032
+    C_gas_CO2   = inp.econ.c_CO2 * Delta_t * _wsum(gas.CO2_gas_factor, Gv.P_gas, T)  # 991+1032
     C_gas = C_gas_gen + C_gas_start + C_gas_stop + C_gas_FOM + C_gas_CO2  # 1033（无 SO2/NOX/烟尘）
 
     # ---- 4.10 核电（1070-1073）----
@@ -124,41 +125,41 @@ def add_objective(m: gp.Model, inp: reader.Inputs, coal: TH.CoalInputs,
     C_ps = float(np.sum(ps.c_ps_FOM * ps.P_ps_max))               # 1052 仅 FOM，无变动成本
 
     # ---- 4.4 水电（1040-1044）----
-    C_hyd = float(inp.fixedCostScale
+    C_hyd = float(inp.econ.fixedCostScale
                   * (np.sum(hyd.FOM_ror * hyd.CAP_ror)
                      + np.sum(hyd.FOM_res * hyd.CAP_res)))          # 1042-1043 仅 FOM 常数
-    C_hyd_curt = inp.c_hyd_curt * Hv.E_hyd_curt.sum()               # 1044 弃水惩罚
+    C_hyd_curt = inp.econ.c_hyd_curt * Hv.E_hyd_curt.sum()               # 1044 弃水惩罚
 
     # ---- 4.9 新能源友好电站（1062-1068）----
     C_fr_degrade = Delta_t * (_wsum(fr.c_fr_degrade, Fv.P_fr_charge, T)
                               + _wsum(fr.c_fr_degrade, Fv.P_fr_discharge, T))   # 1063
-    C_fr_FOM = float(inp.fixedCostScale
+    C_fr_FOM = float(inp.econ.fixedCostScale
                      * (np.sum(fr.fom_wind * fr.wind_cap)
                         + np.sum(fr.fom_pv * fr.pv_cap)
                         + np.sum(fr.fom_power * fr.P_fr_es_max)
                         + np.sum(fr.fom_energy * fr.E_fr_max)))     # 1064-1066 常数
     C_fr = C_fr_degrade + C_fr_FOM                                  # 1067
-    C_fr_curt = (inp.c_wind_curt * Delta_t * Fv.P_fr_wind_curt.sum()
-                 + inp.c_pv_curt * Delta_t * Fv.P_fr_pv_curt.sum())  # 1068
+    C_fr_curt = (inp.econ.c_wind_curt * Delta_t * Fv.P_fr_wind_curt.sum()
+                 + inp.econ.c_pv_curt * Delta_t * Fv.P_fr_pv_curt.sum())  # 1068
 
     # ---- 4.12 需求响应（1079-1082）----
-    C_DR = Delta_t * _wsum(inp.ShiftCost, Sv.P_shift_in, T) \
-         + Delta_t * _wsum(inp.CutCost, Sv.P_cut, T) \
-         + inp.fixedCostPeriodRatio * float(np.sum(inp.DRFixedCost))
+    C_DR = Delta_t * _wsum(inp.dr.ShiftCost, Sv.P_shift_in, T) \
+         + Delta_t * _wsum(inp.dr.CutCost, Sv.P_cut, T) \
+         + inp.econ.fixedCostPeriodRatio * float(np.sum(inp.dr.DRFixedCost))
 
     # ---- 4.7/4.8/4.9 弃电、失负荷（1056/1060/1068、1091）----
-    C_curt = inp.c_wind_curt * Delta_t * Sv.P_wind_curt.sum() \
-           + inp.c_pv_curt * Delta_t * Sv.P_pv_curt.sum() \
+    C_curt = inp.econ.c_wind_curt * Delta_t * Sv.P_wind_curt.sum() \
+           + inp.econ.c_pv_curt * Delta_t * Sv.P_pv_curt.sum() \
            + C_hyd_curt + C_fr_curt                                 # 1090：四项弃电汇总
-    C_shed = inp.c_shed * Delta_t * Sv.P_shed.sum()                 # 1091
+    C_shed = inp.econ.c_shed * Delta_t * Sv.P_shed.sum()                 # 1091
 
     # ---- FOM 常数（1055/1059）----
-    C_windFOM = float(np.sum(inp.c_wind_FOM * inp.W_capacity))       # 1055
-    C_pvFOM   = float(np.sum(inp.c_pv_FOM * inp.PV_capacity))        # 1059
+    C_windFOM = float(np.sum(inp.wind_pv.c_wind_FOM * inp.wind_pv.W_capacity))       # 1055
+    C_pvFOM   = float(np.sum(inp.wind_pv.c_pv_FOM * inp.wind_pv.PV_capacity))        # 1059
 
     consts = (C_th_FOM + C_gas_FOM + C_nuc_FOM + C_bio_FOM + C_ps + C_es_FOM
               + C_hyd + C_fr_FOM + C_windFOM + C_pvFOM
-              + inp.fixedCostPeriodRatio * float(np.sum(inp.DRFixedCost)))
+              + inp.econ.fixedCostPeriodRatio * float(np.sum(inp.dr.DRFixedCost)))
     m.setObjective(C_th + C_gas + C_nuc + C_bio + C_ps + C_es + C_hyd + C_fr
                    + C_DR + C_curt + C_shed + C_windFOM + C_pvFOM,
                    gp.GRB.MINIMIZE)          # 1088-1093（C_gen 含 C_hyd/C_fr，C_curt 含四项）
@@ -190,15 +191,15 @@ def add_objective(m: gp.Model, inp: reader.Inputs, coal: TH.CoalInputs,
         "C_es_degrade": C_es_degrade, "C_es_FOM": C_es_FOM,
         "C_fr_degrade": C_fr_degrade, "C_fr_FOM": C_fr_FOM,
         "C_hyd_curt": C_hyd_curt, "C_CO2": C_CO2, "C_pollution": C_pollution,
-        "C_wind_curt": inp.c_wind_curt * Delta_t * Sv.P_wind_curt.sum(),
-        "C_pv_curt": inp.c_pv_curt * Delta_t * Sv.P_pv_curt.sum(),
+        "C_wind_curt": inp.econ.c_wind_curt * Delta_t * Sv.P_wind_curt.sum(),
+        "C_pv_curt": inp.econ.c_pv_curt * Delta_t * Sv.P_pv_curt.sum(),
         "C_fr_curt": C_fr_curt,
     }
 
 
 def solve(inp: reader.Inputs):
     """组装 + 求解 + 取值；返回纯数据 SolutionData，不做前端口径组装。"""
-    m = gp.Model("coal_gas_nuc_bio_sto_hyd_fr_T%d" % inp.T)
+    m = gp.Model("coal_gas_nuc_bio_sto_hyd_fr_T%d" % inp.time.T)
     coal, gas, nuc, bio, ps, es, hyd, fr, Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv, units = build(m, inp)
     cost_exprs = add_objective(m, inp, coal, gas, nuc, bio, ps, es, hyd, fr,
                                Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv)
@@ -206,7 +207,7 @@ def solve(inp: reader.Inputs):
 
     # 本次运行子目录：results/ 下按 参数+时间戳 命名，日志/CSV/图 全落这里
     run_dir = config.RESULT_DIR / ("T%d_gap%g_%s" % (
-        inp.T, config.MIGAP, datetime.now().strftime("%Y%m%d_%H%M%S")))
+        inp.time.T, config.MIGAP, datetime.now().strftime("%Y%m%d_%H%M%S")))
     run_dir.mkdir(parents=True, exist_ok=True)
     config.RESULT_DIR = run_dir
     # 求解参数镜像 MATLAB 1164-1168
@@ -217,7 +218,7 @@ def solve(inp: reader.Inputs):
     m.Params.DualReductions = config.DUAL_REDUCTIONS
     m.Params.Threads = 1        # 单线程锁定多最优解（code_basic_rule 第6节规格；MATLAB 侧暂不设，保老师定稿锚点）
     m.Params.Seed = 0           # 显式固定随机种子（默认即 0，防御性声明）
-    m.Params.LogFile = str(config.RESULT_DIR / ("gurobi_py_T%d.log" % inp.T))
+    m.Params.LogFile = str(config.RESULT_DIR / ("gurobi_py_T%d.log" % inp.time.T))
     m.optimize()
 
     # ---- 四项核对 ----
@@ -237,7 +238,7 @@ def solve(inp: reader.Inputs):
         write_timeseries_csv(inp, solution)
         return solution
     raise RuntimeError(f"求解无可行解（{names.get(m.Status, m.Status)}），"
-                       f"日志: {config.RESULT_DIR / ('gurobi_py_T%d.log' % inp.T)}")
+                       f"日志: {config.RESULT_DIR / ('gurobi_py_T%d.log' % inp.time.T)}")
 
 
 if __name__ == "__main__":

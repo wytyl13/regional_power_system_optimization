@@ -17,7 +17,7 @@ from dataclasses import dataclass
 import gurobipy as gp
 
 import config
-from reader import _read, _zstr, Inputs
+from power_opt.reader import _read, _zstr, Inputs
 
 
 @dataclass
@@ -46,7 +46,7 @@ def load_es(inp: Inputs) -> ESInputs:
     esData = _read(config.UNIT_FILE, "电化学储能", req_es)
     N_es = len(esData)
     zone_es = [_zstr(v) for v in esData["AreaID"]]
-    areaPos = {a: i for i, a in enumerate(inp.AreaID)}
+    areaPos = {a: i for i, a in enumerate(inp.areas.AreaID)}
     if miss := [z for z in zone_es if z not in areaPos]:
         raise KeyError(f"电储能分区编号 {set(miss)} 不在分区表中")
     area_es = np.array([areaPos[z] for z in zone_es], dtype=int)
@@ -63,8 +63,8 @@ def load_es(inp: Inputs) -> ESInputs:
     #                          × REPLACE_FACTOR / (2·E_max·MAX_CYCLES)
     c_es_degrade = ((P_es_max * f("POWER_COST") + E_es_max * f("ENERGY_COST"))
                     * f("REPLACE_FACTOR") / (2 * E_es_max * f("MAX_CYCLES")))
-    c_es_FOM = inp.fixedCostScale * f("FOM_COST_PERIOD")            # 391
-    c_es_energy_FOM = inp.fixedCostScale * f("FOM_ENERGY_PERIOD")   # 392
+    c_es_FOM = inp.econ.fixedCostScale * f("FOM_COST_PERIOD")            # 391
+    c_es_energy_FOM = inp.econ.fixedCostScale * f("FOM_ENERGY_PERIOD")   # 392
 
     for name, arr in [("P_es_max", P_es_max), ("E_es_initial", E_es_initial),
                       ("c_es_degrade", c_es_degrade), ("eta_es_ch", eta_es_ch)]:
@@ -118,7 +118,7 @@ def add_constraints(m: gp.Model, es: ESInputs, var: ESVars,
     对账来源：MATLAB log 减法 192,410 − 183,042 − 9,100(抽蓄) = 268。"""
     if es.N_es == 0:                                              # MATLAB 819 守卫
         return
-    N, Delta_t = es.N_es, inp.Delta_t
+    N, Delta_t = es.N_es, inp.time.Delta_t
     Pch, Pdis = var.P_es_charge, var.P_es_discharge
     uch, udis = var.u_es_ch, var.u_es_dis
     E, R = var.E_es, var.R_es_hot
@@ -152,7 +152,7 @@ def add_constraints(m: gp.Model, es: ESInputs, var: ESVars,
     m.addConstr(0 <= R, name="R_lb")
     m.addConstr(Pdis + R <= Pmax * (1 - uch), name="R_ub")
     # ---- MATLAB 829：备用能量限制 rd·R <= eta_dis·(E(2:T+1)-Emin) ----
-    rd = inp.reserveDuration[inp.areaProvince[es.area_es]]        # 省级参数领行
+    rd = inp.prov.reserveDuration[inp.areas.areaProvince[es.area_es]]        # 省级参数领行
     rdT = np.repeat(np.asarray(rd, float)[:, None], T, axis=1)
     eta_dis = np.repeat(es.eta_es_dis[:, None], T, axis=1)
     EminT = np.repeat(es.E_es_min[:, None], T, axis=1)
@@ -160,10 +160,10 @@ def add_constraints(m: gp.Model, es: ESInputs, var: ESVars,
 
 
 if __name__ == "__main__":
-    import reader
+    import power_opt.reader as reader
     inp = reader.load_inputs()
     es = load_es(inp)
-    T = inp.T
+    T = inp.time.T
     print('输入自检: N_es=%d, degrade=%.2f 元/MWh吞吐, FOM常数=%.2f'
           % (es.N_es, float(es.c_es_degrade[0]),
              float(np.sum(es.c_es_FOM * es.P_es_max + es.c_es_energy_FOM * es.E_es_max))))

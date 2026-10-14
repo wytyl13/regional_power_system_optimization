@@ -16,7 +16,7 @@ from dataclasses import dataclass
 import gurobipy as gp
 
 import config
-from reader import _read, _zstr, Inputs
+from power_opt.reader import _read, _zstr, Inputs
 
 
 @dataclass
@@ -44,11 +44,35 @@ class CoalInputs:
 
 def load_coal(inp: Inputs) -> CoalInputs:
     """镜像 MATLAB 1.3 节（87-135）+ 六节点派生（105-106）。缺列缺值即报错。"""
-    T = inp.T
+    T = inp.time.T
     # ---- 检修计划：领取 Type=煤电 的行（MATLAB 118-123，区间左闭右开）----
     mtn_coal = inp.maintenance[inp.maintenance["Type"].astype(str) == "煤电"]
 
     # ---- 1.3 煤电表（MATLAB 87-123）----
+    """
+    CAP：容量
+    DERATE_RATE：非供暖受阻率
+    MIN_POWER_GEN：最小技术出力
+    INIT_STATUS：周期前运行状态
+    COST_START_UP：启动成本
+    COST_SHUT_DOWN：停机成本
+    COST_A：燃料二次项（耗煤成本函数的二次系数）
+    COST_B：燃料一次项（耗煤成本函数的一次系数）
+    COST_C：燃料常数项（耗煤成本函数的常数项）
+    MIN_UP_TIME：最小连续开机时间
+    MIN_DOWN_TIME：最小连续停机时间
+    INIT_HOURS：初始状态已持续时长
+    INIT_POWER：周期前功率（初始出力）
+    RAMP_LIMIT_UP：向上爬坡（允许的功率上升速率）
+    RAMP_LIMIT_DOWN：向下爬坡（允许的功率下降速率）
+    START_RAMP：启动允许功率变化
+    STOP_RAMP：停机允许功率变化
+    FOM_COST_PERIOD：年度功率运维成本
+    SO2_FACTOR：SO2排放因子
+    NOX_FACTOR：NOx排放因子
+    DUST_FACTOR：烟尘排放因子
+    
+    """
     req_th = ["UnitKey", "SUBSTR(C.ID，12)", "CAP", "DERATE_RATE", "MIN_POWER_GEN", "INIT_STATUS",
               "COST_START_UP", "COST_SHUT_DOWN", "COST_A", "COST_B", "COST_C",
               "MIN_UP_TIME", "MIN_DOWN_TIME", "INIT_HOURS", "INIT_POWER",
@@ -57,40 +81,41 @@ def load_coal(inp: Inputs) -> CoalInputs:
     thData = _read(config.UNIT_FILE, "煤电", req_th)
     N_th = len(thData)
     zone_th = [_zstr(v) for v in thData["SUBSTR(C.ID，12)"]]
-    areaPos = {a: i for i, a in enumerate(inp.AreaID)}
+    areaPos = {a: i for i, a in enumerate(inp.areas.AreaID)}
     if miss := [z for z in zone_th if z not in areaPos]:
         raise KeyError(f"煤电分区编号 {set(miss)} 不在分区表中")
     area_th = np.array([areaPos[z] for z in zone_th])
     f = lambda c: thData[c].to_numpy(float)
     UnitKey_th = thData["UnitKey"].astype(str).tolist()
     name_th = thData["NAME"].astype(str).tolist()                 # 八~十一节分析表用
+
     # MATLAB 81-82：额定容量只作固定运维基数；出力上限=额定×(1-受阻率)
     P_th_rated = f("CAP")
     P_th_max = P_th_rated * (1.0 - f("DERATE_RATE")); P_th_min = f("MIN_POWER_GEN")
     u_th_0 = f("INIT_STATUS")
-    c_th_start = inp.costScale * f("COST_START_UP"); c_th_stop = inp.costScale * f("COST_SHUT_DOWN")
-    a_th = inp.costScale * f("COST_A"); b_th = inp.costScale * f("COST_B"); c_th = inp.costScale * f("COST_C")
+    c_th_start = inp.econ.costScale * f("COST_START_UP"); c_th_stop = inp.econ.costScale * f("COST_SHUT_DOWN")
+    a_th = inp.econ.costScale * f("COST_A"); b_th = inp.econ.costScale * f("COST_B"); c_th = inp.econ.costScale * f("COST_C")
     T_th_up = f("MIN_UP_TIME"); T_th_down = f("MIN_DOWN_TIME"); T_th_initial = f("INIT_HOURS")
     P_th_0 = f("INIT_POWER"); RU_th = f("RAMP_LIMIT_UP"); RD_th = f("RAMP_LIMIT_DOWN")
     SU_th = f("START_RAMP"); SD_th = f("STOP_RAMP")
-    c_th_FOM = inp.fixedCostScale * f("FOM_COST_PERIOD")
+    c_th_FOM = inp.econ.fixedCostScale * f("FOM_COST_PERIOD")
     SO2_th_factor = f("SO2_FACTOR"); NOX_th_factor = f("NOX_FACTOR"); dust_th_factor = f("DUST_FACTOR")
 
     m_th = np.zeros((N_th, T))
     keyPos = {k: i for i, k in enumerate(UnitKey_th)}
-    t_prev = inp.Time[0] - pd.Timedelta(hours=1)   # 起点前 1 小时（MATLAB 114）
+    t_prev = inp.time.Time[0] - pd.Timedelta(hours=1)   # 起点前 1 小时（MATLAB 114）
     for _, plan in mtn_coal.iterrows():
         key = str(plan["UnitKey"])
         if key not in keyPos:
             raise KeyError(f"检修计划机组 {key} 不在煤电表中（不猜、不忽略）")
-        periods = (inp.Time >= plan["StartTime"]) & (inp.Time < plan["EndTime"])
+        periods = (inp.time.Time >= plan["StartTime"]) & (inp.time.Time < plan["EndTime"])
         m_th[keyPos[key], periods] = 1
         # MATLAB 114-118：起点前 1 小时已在检修窗口 → 初值覆盖为停机，累计已停机小时
         if plan["StartTime"] <= t_prev < plan["EndTime"]:
             i = keyPos[key]
             u_th_0[i] = 0.0
             P_th_0[i] = 0.0
-            T_th_initial[i] = (inp.Time[0] - plan["StartTime"]).total_seconds() / 3600.0
+            T_th_initial[i] = (inp.time.Time[0] - plan["StartTime"]).total_seconds() / 3600.0
 
     # ---- 六节点排放（MATLAB 125-135）：每台 6 行，NodeIndex 必须是 0..5 ----
     em = _read(config.SYSTEM_FILE, "煤电碳排节点", ["UnitKey", "NodeIndex", "CO2Rate_t_h"])
@@ -283,7 +308,7 @@ def add_constraints(m: gp.Model, coal: CoalInputs, var: ThermalVars) -> None:
 
 if __name__ == "__main__":
     import numpy as np
-    import reader
+    import power_opt.reader as reader
     inp = reader.load_inputs()
     coal = load_coal(inp)
     print('输入自检: N_th=%d, m_th sum=%s, FOM常数=%.2f'

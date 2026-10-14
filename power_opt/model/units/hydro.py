@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 import gurobipy as gp
 
 import config
-from reader import _read, _zstr, Inputs
+from power_opt.reader import _read, _zstr, Inputs
 
 
 @dataclass
@@ -45,7 +45,7 @@ def load_hyd(inp: Inputs) -> HydInputs:
     rorData = _read(config.UNIT_FILE, "径流式水电", req_hyd)
     resData = _read(config.UNIT_FILE, "库容式水电", req_hyd)
     N_ror, N_res = len(rorData), len(resData)
-    areaPos = {a: i for i, a in enumerate(inp.AreaID)}
+    areaPos = {a: i for i, a in enumerate(inp.areas.AreaID)}
     zone_ror = [_zstr(v) for v in rorData["AreaID"]]
     zone_res = [_zstr(v) for v in resData["AreaID"]]
     if miss := [z for z in zone_ror if z not in areaPos]:
@@ -66,7 +66,7 @@ def load_hyd(inp: Inputs) -> HydInputs:
         # MATLAB 419 无守卫：情景名写错会空表静默出错，按数值安全纪律显式报错
         raise KeyError(f"水电月参数无情景 {config.HYDROLOGY_SCENARIO!r} 的行"
                        "（检查 config.HYDROLOGY_SCENARIO 与表内 Hydrology 列）")
-    T = inp.T
+    T = inp.time.T
     P_ror_min = np.zeros((N_ror, T)); P_ror_exp = np.zeros((N_ror, T))
     P_res_min = np.zeros((N_res, T)); P_res_exp = np.zeros((N_res, T))
     for keys, mins, exps in ((UnitKey_ror, P_ror_min, P_ror_exp),
@@ -81,14 +81,14 @@ def load_hyd(inp: Inputs) -> HydInputs:
                     raise KeyError(f"水电月参数机组 {key} 的 {mo} 月有重复行")
                 mmap[mo] = idx
             try:
-                sel = rows.loc[[mmap[mo] for mo in inp.Time.month]]    # MATLAB 426 ismember
+                sel = rows.loc[[mmap[mo] for mo in inp.time.Time.month]]    # MATLAB 426 ismember
             except KeyError as e:
                 raise KeyError(f"水电月参数缺机组 {key} 的 {e} 月行") from None
             mins[i, :] = sel["ForcedMW"].to_numpy(float)             # MATLAB 427/433
             exps[i, :] = sel["ExpectedMW"].to_numpy(float)           # MATLAB 428/434
 
     # ---- 调节周期（MATLAB 436-450）：每台库容水电 × 每个覆盖月份一个周期 ----
-    hourMonth = inp.Time.to_period("M")                             # 每小时所属月
+    hourMonth = inp.time.Time.to_period("M")                             # 每小时所属月
     Month = list(dict.fromkeys(hourMonth))                          # unique stable
     N_period = N_res * len(Month)                                   # MATLAB 438
     hydPeriodUnit = np.zeros(N_period, dtype=int)
@@ -104,7 +104,7 @@ def load_hyd(inp: Inputs) -> HydInputs:
             hydPeriodHours.append(hrs)
             if mo.month not in avg:
                 raise KeyError(f"水电月参数缺机组 {key} 的 {mo.month} 月 AverageMW 行")
-            E_hyd_available[k] = avg[mo.month] * len(hrs) * inp.Delta_t
+            E_hyd_available[k] = avg[mo.month] * len(hrs) * inp.time.Delta_t
 
     for name, arr in [("P_hyd_ror_min", P_ror_min), ("P_hyd_ror_expected", P_ror_exp),
                       ("P_hyd_res_min", P_res_min), ("P_hyd_res_expected", P_res_exp),
@@ -173,7 +173,7 @@ def add_constraints(m: gp.Model, hyd: HydInputs, var: HydVars,
             periods = hyd.hydPeriodHours[k]
             # MATLAB 813：E_hyd_used = sum(P+R over 周期时段)*Delta_t（表达式不建行）
             E_used = (var.P_hyd_res[i, periods].sum()
-                      + var.R_hyd_hot[i, periods].sum()) * inp.Delta_t
+                      + var.R_hyd_hot[i, periods].sum()) * inp.time.Delta_t
             m.addConstr(E_used <= hyd.E_hyd_available[k], name=f"period_budget_{k}")
             m.addConstr(var.E_hyd_curt[k, 0] == hyd.E_hyd_available[k] - E_used,
                         name=f"period_curt_{k}")
@@ -181,11 +181,11 @@ def add_constraints(m: gp.Model, hyd: HydInputs, var: HydVars,
 
 
 if __name__ == "__main__":
-    import reader
+    import power_opt.reader as reader
     inp = reader.load_inputs()
     hyd = load_hyd(inp)
-    T = inp.T
-    fom_const = float(inp.fixedCostScale
+    T = inp.time.T
+    fom_const = float(inp.econ.fixedCostScale
                       * (np.sum(hyd.FOM_ror * hyd.CAP_ror)
                          + np.sum(hyd.FOM_res * hyd.CAP_res)))      # MATLAB 1036-1037
     print('输入自检: N_ror=%d, N_res=%d, N_period=%d' %
@@ -199,7 +199,7 @@ if __name__ == "__main__":
     print('  周期: 机组=%d 小时数=%d E_avail=%.2f MWh' %
           (hyd.hydPeriodUnit[0], len(hyd.hydPeriodHours[0]),
            hyd.E_hyd_available[0]))
-    print('  C_hyd FOM 常数=%.2f 元, c_hyd_curt=%s 元/MWh' % (fom_const, inp.c_hyd_curt))
+    print('  C_hyd FOM 常数=%.2f 元, c_hyd_curt=%s 元/MWh' % (fom_const, inp.econ.c_hyd_curt))
 
     m = gp.Model()
     Hv = add_vars(m, hyd, T)

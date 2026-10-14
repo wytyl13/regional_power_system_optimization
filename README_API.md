@@ -35,6 +35,7 @@
 > file: binary #上传二进制模板文件（可选）
 
 > **return: 传递file**
+
 ```json
 {
   "datasetId": "ds_9bfeec0820e3",
@@ -73,14 +74,13 @@
 }
 ```
 
-
 > **return: 不传递file**
+
 ```json
 {
 	"config": {}
 }
 ```
-
 
 ## GET /api/datasets//curves/
 
@@ -89,6 +89,7 @@
 **示例：** http://192.168.2.40:9999/api/datasets/<id></id>/curves/负荷-8760?区域=海南"
 
 > **return**
+
 ```json
 {
 	"columns": [],
@@ -101,6 +102,7 @@
 > 提交计算（datasetId + config）→ jobId
 
 > **传参**
+
 ```json
 {
 	"datasetId": "", # /api/datasets的返回值datasetId
@@ -113,6 +115,7 @@
 ```
 
 > **return**
+
 ```json
 {
 	"jobId": "job_20261013_145202_c677c8"
@@ -171,11 +174,12 @@
 }
 ```
 
-## GET /api/jobs/{job_id}
+## GET /api/jobs/
 
 > 查看指定任务
 
 > **return**
+
 ```json
 {
 
@@ -195,6 +199,7 @@
 **示例1：** http://127.0.0.1:8000/api/jobs/job_20261013_145202_c677c8/results
 
 > **return**
+
 ```json
 {
 	"detail": "任务状态 running，尚无结果"

@@ -18,7 +18,7 @@ from dataclasses import dataclass
 import gurobipy as gp
 
 import config
-from reader import _read, _zstr, Inputs
+from power_opt.reader import _read, _zstr, Inputs
 from model.units.thermal import _col_repmat
 
 
@@ -44,7 +44,7 @@ class GasInputs:
 
 def load_gas(inp: Inputs) -> GasInputs:
     """镜像 MATLAB 1.4 节（138-172）。缺列缺值即报错。"""
-    T = inp.T
+    T = inp.time.T
     # ---- 检修计划：领取 Type=气电 的行（MATLAB 161-166，区间左闭右开）----
     mtn_gas = inp.maintenance[inp.maintenance["Type"].astype(str) == "气电"]
 
@@ -57,7 +57,7 @@ def load_gas(inp: Inputs) -> GasInputs:
     gasData = _read(config.UNIT_FILE, "气电", req_gas)
     N_gas = len(gasData)
     zone_gas = [_zstr(v) for v in gasData["SUBSTR(C.ID，12)"]]
-    areaPos = {a: i for i, a in enumerate(inp.AreaID)}
+    areaPos = {a: i for i, a in enumerate(inp.areas.AreaID)}
     if miss := [z for z in zone_gas if z not in areaPos]:
         raise KeyError(f"气电分区编号 {set(miss)} 不在分区表中")
     area_gas = np.array([areaPos[z] for z in zone_gas])
@@ -68,22 +68,22 @@ def load_gas(inp: Inputs) -> GasInputs:
     P_gas_rated = f("CAP")
     P_gas_max = P_gas_rated * (1.0 - f("DERATE_RATE")); P_gas_min = f("MIN_POWER_GEN")
     u_gas_0 = f("INIT_STATUS")
-    c_gas_start = inp.costScale * f("COST_START_UP"); c_gas_stop = inp.costScale * f("COST_SHUT_DOWN")
-    c_gas_gen = inp.costScale * f("GEN_COST")
+    c_gas_start = inp.econ.costScale * f("COST_START_UP"); c_gas_stop = inp.econ.costScale * f("COST_SHUT_DOWN")
+    c_gas_gen = inp.econ.costScale * f("GEN_COST")
     P_gas_0 = f("INIT_POWER"); RU_gas = f("RAMP_LIMIT_UP"); RD_gas = f("RAMP_LIMIT_DOWN")
     SU_gas = f("START_RAMP"); SD_gas = f("STOP_RAMP")
     CO2_gas_factor = f("CO2_FACTOR")
     T_gas_up = f("MIN_UP_TIME"); T_gas_down = f("MIN_DOWN_TIME"); T_gas_initial = f("INIT_HOURS")
-    c_gas_FOM = inp.fixedCostScale * f("FOM_COST_PERIOD")
+    c_gas_FOM = inp.econ.fixedCostScale * f("FOM_COST_PERIOD")
 
     m_gas = np.zeros((N_gas, T))
     keyPos = {k: i for i, k in enumerate(UnitKey_gas)}
-    t_prev = inp.Time[0] - pd.Timedelta(hours=1)   # 起点前 1 小时（MATLAB 163）
+    t_prev = inp.time.Time[0] - pd.Timedelta(hours=1)   # 起点前 1 小时（MATLAB 163）
     for _, plan in mtn_gas.iterrows():
         key = str(plan["UnitKey"])
         if key not in keyPos:
             raise KeyError(f"检修计划机组 {key} 不在气电表中（不猜、不忽略）")
-        periods = (inp.Time >= plan["StartTime"]) & (inp.Time < plan["EndTime"])
+        periods = (inp.time.Time >= plan["StartTime"]) & (inp.time.Time < plan["EndTime"])
         m_gas[keyPos[key], periods] = 1
         # MATLAB 163-167：起点前 1 小时已在检修窗口 → 初值覆盖为停机，累计已停机小时
         # （T_gas_initial 先读 INIT_HOURS（157 行），在此被覆盖）
@@ -91,7 +91,7 @@ def load_gas(inp: Inputs) -> GasInputs:
             i = keyPos[key]
             u_gas_0[i] = 0.0
             P_gas_0[i] = 0.0
-            T_gas_initial[i] = (inp.Time[0] - plan["StartTime"]).total_seconds() / 3600.0
+            T_gas_initial[i] = (inp.time.Time[0] - plan["StartTime"]).total_seconds() / 3600.0
 
     for name, arr in [("P_gas_rated", P_gas_rated), ("P_gas_max", P_gas_max), ("P_gas_min", P_gas_min), ("m_gas", m_gas),
                       ("CO2_gas_factor", CO2_gas_factor)]:
@@ -221,7 +221,7 @@ def add_constraints(m: gp.Model, gas: GasInputs, var: GasVars) -> None:
 
 if __name__ == "__main__":
     import numpy as np
-    import reader
+    import power_opt.reader as reader
     inp = reader.load_inputs()
     gas = load_gas(inp)
     print('输入自检: N_gas=%d, m_gas sum=%s, FOM常数=%.2f'

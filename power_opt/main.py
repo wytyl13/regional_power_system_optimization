@@ -9,7 +9,7 @@
 import time
 
 import config
-import reader
+import power_opt.reader as reader
 from solve import solve
 from solution import compute_metrics, write_result_json
 

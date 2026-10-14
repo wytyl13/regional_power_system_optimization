@@ -54,7 +54,7 @@ def _hyd_curt_series(inp, U, V):
     """E_hyd_curt 非 hour 网格条目：keys 即周期标签（机组·月），一行一值。"""
     return {
         "keys": [f"{U['hydro_reservoir']['keys'][int(i)]}·"
-                 f"{inp.Time[hours[0]].strftime('%Y-%m')}"
+                 f"{inp.time.Time[hours[0]].strftime('%Y-%m')}"
                  for i, hours in zip(U["hydro_reservoir"]["period_unit"],
                                     U["hydro_reservoir"]["period_hours"])],
         "data": np.asarray(V["E_hyd_curt"]).tolist(),
@@ -67,45 +67,45 @@ def compute_metrics(inp, solution) -> dict:
     V = solution.values
     U = solution.units
     F = solution.inputs_fields
-    Delta_t = inp.Delta_t
+    Delta_t = inp.time.Delta_t
 
-    A_th = _aggregation(inp.Narea, U["thermal"]["area"])
-    A_gas = _aggregation(inp.Narea, U["gas"]["area"])
-    A_hyd_ror = _aggregation(inp.Narea, U["hydro_ror"]["area"])
-    A_hyd_res = _aggregation(inp.Narea, U["hydro_reservoir"]["area"])
-    A_ps = _aggregation(inp.Narea, U["pumped_storage"]["area"])
-    A_es = _aggregation(inp.Narea, U["electrochemical"]["area"])
-    A_fr = _aggregation(inp.Narea, U["friendly"]["area"])
-    A_line = np.zeros((inp.Narea, inp.N_line))
-    A_line[inp.line_from, np.arange(inp.N_line)] = -1
-    A_line[inp.line_to, np.arange(inp.N_line)] = 1
+    A_th = _aggregation(inp.areas.Narea, U["thermal"]["area"])
+    A_gas = _aggregation(inp.areas.Narea, U["gas"]["area"])
+    A_hyd_ror = _aggregation(inp.areas.Narea, U["hydro_ror"]["area"])
+    A_hyd_res = _aggregation(inp.areas.Narea, U["hydro_reservoir"]["area"])
+    A_ps = _aggregation(inp.areas.Narea, U["pumped_storage"]["area"])
+    A_es = _aggregation(inp.areas.Narea, U["electrochemical"]["area"])
+    A_fr = _aggregation(inp.areas.Narea, U["friendly"]["area"])
+    A_line = np.zeros((inp.areas.Narea, inp.lines.N_line))
+    A_line[inp.lines.line_from, np.arange(inp.lines.N_line)] = -1
+    A_line[inp.lines.line_to, np.arange(inp.lines.N_line)] = 1
 
     # 平衡残差 = 发电 + 储能净出力 + 净受入 + 失负荷 − 响应后负荷（MATLAB 1178）
     P_G = (A_th @ V["P_th"] + A_gas @ V["P_gas"]
-           + _aggregation(inp.Narea, U["nuclear"]["area"]) @ V["P_nuc"]
-           + _aggregation(inp.Narea, U["biomass"]["area"]) @ V["P_bio"]
+           + _aggregation(inp.areas.Narea, U["nuclear"]["area"]) @ V["P_nuc"]
+           + _aggregation(inp.areas.Narea, U["biomass"]["area"]) @ V["P_bio"]
            + V["P_wind"] + V["P_pv"]
            + A_hyd_ror @ V["P_hyd_ror"] + A_hyd_res @ V["P_hyd_res"]
            + A_fr @ (V["P_fr_wind_out"] + V["P_fr_pv_out"] + V["P_fr_discharge"]))
     P_sto = (A_ps @ V["P_ps_gen"] - A_ps @ V["P_ps_pump"]
              + A_es @ V["P_es_discharge"] - A_es @ V["P_es_charge"])
     P_tr = A_line @ V["P_line"]
-    P_D = (inp.P_load - V["P_shift_out"] + V["P_shift_in"] - V["P_cut"])
+    P_D = (inp.profiles.P_load - V["P_shift_out"] + V["P_shift_in"] - V["P_cut"])
     resid = P_G + P_sto + P_tr + V["P_shed"] - P_D
     print("功率平衡残差 max: %.3g MW（MATLAB 1178 行同款自检，应≈0）"
           % np.abs(resid).max())
 
     # 新能源利用率（省级聚合含友好站，MATLAB 1181-1186）
-    A_prov = np.zeros((inp.Nprovince, inp.Narea))
-    A_prov[inp.areaProvince, np.arange(inp.Narea)] = 1
-    RE_avail = A_prov @ (inp.P_wind_available + inp.P_pv_available
+    A_prov = np.zeros((inp.areas.Nprovince, inp.areas.Narea))
+    A_prov[inp.areas.areaProvince, np.arange(inp.areas.Narea)] = 1
+    RE_avail = A_prov @ (inp.profiles.P_wind_available + inp.profiles.P_pv_available
                          + A_fr @ (U["friendly"]["wind_available"]
                                    + U["friendly"]["pv_available"]))
     RE_curt = A_prov @ (V["P_wind_curt"] + V["P_pv_curt"]
                         + A_fr @ (V["P_fr_wind_curt"] + V["P_fr_pv_curt"]))
     available_energy = RE_avail.sum(axis=1) * Delta_t
     curtailed_energy = RE_curt.sum(axis=1) * Delta_t
-    utilization = np.full(inp.Nprovince, np.nan)
+    utilization = np.full(inp.areas.Nprovince, np.nan)
     has_re = available_energy > 0
     utilization[has_re] = 1 - curtailed_energy[has_re] / available_energy[has_re]
     energy_not_served = float(V["P_shed"].sum() * Delta_t)       # 1187
@@ -122,9 +122,9 @@ def compute_metrics(inp, solution) -> dict:
                      + A_es @ V["R_es_hot"])
     Rcold = A_prov @ (A_th @ V["R_th_cold"] + A_gas @ V["R_gas_cold"])
     hot_margin = float((Rhot - np.repeat(
-        inp.hotReserveRatio[:, None], inp.T, 1) * inp.P_week_peak).min())
+        inp.prov.hotReserveRatio[:, None], inp.time.T, 1) * inp.week_peak).min())
     cold_margin = float((Rcold - np.repeat(
-        inp.coldReserveRatio[:, None], inp.T, 1) * inp.P_week_peak).min())
+        inp.prov.coldReserveRatio[:, None], inp.time.T, 1) * inp.week_peak).min())
 
     # CO2 总量（1001 同式）/ 储能首末能量闭合
     co2_t = float(Delta_t * (V["CO2_th"].sum()
@@ -260,16 +260,16 @@ def extract_all(m: gp.Model, inp, coal: TH.CoalInputs, gas: GA.GasInputs,
     }
 
     inputs_fields = {
-        "T": inp.T, "Delta_t": inp.Delta_t,
-        "AreaID": inp.AreaID, "AreaName": inp.AreaName,
-        "Narea": inp.Narea, "Nprovince": inp.Nprovince,
-        "areaProvince": inp.areaProvince, "P_load": inp.P_load,
-        "P_wind_available": inp.P_wind_available,
-        "P_pv_available": inp.P_pv_available,
-        "N_line": inp.N_line, "line_from": inp.line_from,
-        "line_to": inp.line_to, "P_week_peak": inp.P_week_peak,
-        "hotReserveRatio": inp.hotReserveRatio,
-        "coldReserveRatio": inp.coldReserveRatio,
+        "T": inp.time.T, "Delta_t": inp.time.Delta_t,
+        "AreaID": inp.areas.AreaID, "AreaName": inp.areas.AreaName,
+        "Narea": inp.areas.Narea, "Nprovince": inp.areas.Nprovince,
+        "areaProvince": inp.areas.areaProvince, "P_load": inp.profiles.P_load,
+        "P_wind_available": inp.profiles.P_wind_available,
+        "P_pv_available": inp.profiles.P_pv_available,
+        "N_line": inp.lines.N_line, "line_from": inp.lines.line_from,
+        "line_to": inp.lines.line_to, "P_week_peak": inp.week_peak,
+        "hotReserveRatio": inp.prov.hotReserveRatio,
+        "coldReserveRatio": inp.prov.coldReserveRatio,
         "CO2_gas_factor": gas.CO2_gas_factor,
         "P_hyd_ror_min": hyd.P_hyd_ror_min,
         "P_hyd_res_min": hyd.P_hyd_res_min,
@@ -310,13 +310,13 @@ def write_result_json(inp, solution, config, metrics) -> None:
     metrics = 残差/利用率等组装期派生量（与 report 一并落盘，函数内不重复算两遍）。"""
     V = solution.values
     U = solution.units
-    Delta_t = inp.Delta_t
-    A = lambda name, n=None: _aggregation(inp.Narea, U[name]["area"]) \
-        if n is None else _aggregation(inp.Narea, U[name]["area"])
+    Delta_t = inp.time.Delta_t
+    A = lambda name, n=None: _aggregation(inp.areas.Narea, U[name]["area"]) \
+        if n is None else _aggregation(inp.areas.Narea, U[name]["area"])
 
-    A_line = np.zeros((inp.Narea, inp.N_line))
-    A_line[inp.line_from, np.arange(inp.N_line)] = -1
-    A_line[inp.line_to, np.arange(inp.N_line)] = 1
+    A_line = np.zeros((inp.areas.Narea, inp.lines.N_line))
+    A_line[inp.lines.line_from, np.arange(inp.lines.N_line)] = -1
+    A_line[inp.lines.line_to, np.arange(inp.lines.N_line)] = 1
 
     series = {
         "P_th": _series(U["thermal"]["keys"], V["P_th"]),
@@ -325,14 +325,14 @@ def write_result_json(inp, solution, config, metrics) -> None:
         "u_gas": _series(U["gas"]["keys"], V["u_gas"]),
         "P_nuc": _series(U["nuclear"]["keys"], V["P_nuc"]),
         "P_bio": _series(U["biomass"]["keys"], V["P_bio"]),
-        "P_wind": _series(inp.AreaName, V["P_wind"]),
-        "P_pv": _series(inp.AreaName, V["P_pv"]),
-        "P_wind_curt": _series(inp.AreaName, V["P_wind_curt"]),
-        "P_pv_curt": _series(inp.AreaName, V["P_pv_curt"]),
-        "P_shed": _series(inp.AreaName, V["P_shed"]),
-        "P_shift_out": _series(inp.AreaName, V["P_shift_out"]),
-        "P_shift_in": _series(inp.AreaName, V["P_shift_in"]),
-        "P_cut": _series(inp.AreaName, V["P_cut"]),
+        "P_wind": _series(inp.areas.AreaName, V["P_wind"]),
+        "P_pv": _series(inp.areas.AreaName, V["P_pv"]),
+        "P_wind_curt": _series(inp.areas.AreaName, V["P_wind_curt"]),
+        "P_pv_curt": _series(inp.areas.AreaName, V["P_pv_curt"]),
+        "P_shed": _series(inp.areas.AreaName, V["P_shed"]),
+        "P_shift_out": _series(inp.areas.AreaName, V["P_shift_out"]),
+        "P_shift_in": _series(inp.areas.AreaName, V["P_shift_in"]),
+        "P_cut": _series(inp.areas.AreaName, V["P_cut"]),
         "P_ps_gen": _series(U["pumped_storage"]["keys"], V["P_ps_gen"]),
         "P_ps_pump": _series(U["pumped_storage"]["keys"], V["P_ps_pump"]),
         "E_ps": _series(U["pumped_storage"]["keys"], V["E_ps"]),
@@ -361,7 +361,7 @@ def write_result_json(inp, solution, config, metrics) -> None:
     es_net = (V["P_es_discharge"] - V["P_es_charge"]
               + V["P_fr_discharge"]).sum(axis=0)
     PD_tot = metrics["P_D"].sum(axis=0)
-    ZT = np.zeros(inp.T)
+    ZT = np.zeros(inp.time.T)
     pc = OrderedDict((   # 27 列：老版顺序（列序即老 Excel 列序，勿动）
         ("核电", V["P_nuc"].sum(axis=0)),
         ("煤电最小技术出力", th_min),
@@ -380,9 +380,9 @@ def write_result_json(inp, solution, config, metrics) -> None:
         ("新型储能", es_net),
         ("发电曲线", PD_tot + V["P_ps_pump"].sum(axis=0) + V["P_es_charge"].sum(axis=0)),
         ("修正后负荷曲线", PD_tot),
-        ("需求响应", inp.P_load.sum(axis=0) - PD_tot),
+        ("需求响应", inp.profiles.P_load.sum(axis=0) - PD_tot),
         ("送电曲线", ZT),                        # 当前模型无对应量 → 0
-        ("本地负荷", inp.P_load.sum(axis=0)),
+        ("本地负荷", inp.profiles.P_load.sum(axis=0)),
         ("水火备用", V["R_th_hot"].sum(axis=0) + V["R_hyd_hot"].sum(axis=0)),
         ("旋转备用", metrics["Rhot"].sum(axis=0)),
         ("核电压出力", ZT),                      # 当前模型无对应量 → 0
@@ -402,8 +402,8 @@ def write_result_json(inp, solution, config, metrics) -> None:
                       for key, value in pc.items()}
 
     report = {
-        "hours": inp.T,
-        "startTime": str(inp.Time[0]), "endTime": str(inp.Time[-1]),
+        "hours": inp.time.T,
+        "startTime": str(inp.time.Time[0]), "endTime": str(inp.time.Time[-1]),
         "scenario": config.HYDROLOGY_SCENARIO,
         "problem": 0 if solution.four_items["status"] == "OPTIMAL"
                    else int(solution.four_items["objective"]["value"] or 0),
@@ -447,15 +447,15 @@ def write_result_json(inp, solution, config, metrics) -> None:
     }
     doc = {
         "meta": {
-            "T": inp.T, "delta_t_hours": inp.Delta_t,
-            "startTime": str(inp.Time[0]), "endTime": str(inp.Time[-1]),
+            "T": inp.time.T, "delta_t_hours": inp.time.Delta_t,
+            "startTime": str(inp.time.Time[0]), "endTime": str(inp.time.Time[-1]),
             "scenario": config.HYDROLOGY_SCENARIO,
             "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         },
         "report": report,
         "positionChart": position_chart,
         "time": [timestamp.strftime("%Y-%m-%d %H:%M:%S")
-                 for timestamp in inp.Time],
+                 for timestamp in inp.time.Time],
         "labels": labels,
         "series": series,
         "costs": solution.costs,          # 成本分项（六表取值用；恒等式见 test_algrithm）
@@ -470,17 +470,17 @@ def write_timeseries_csv(inp, solution) -> None:
     values = solution.values
     units = solution.units
     cols = {"Time": [timestamp.strftime("%Y-%m-%d %H:%M")
-                     for timestamp in inp.Time]}
+                     for timestamp in inp.time.Time]}
 
     def area_columns(prefix, values_array):
-        for index, area_id in enumerate(inp.AreaID):
+        for index, area_id in enumerate(inp.areas.AreaID):
             cols[f"{prefix}_{area_id}"] = np.asarray(values_array)[index]
 
     def unit_columns(prefix, unit_name, values_array, skip=0):
         for key, row in zip(units[unit_name]["keys"], np.asarray(values_array)):
             cols[f"{prefix}_{key}"] = np.asarray(row)[skip:]
 
-    area_columns("P_load", inp.P_load)
+    area_columns("P_load", inp.profiles.P_load)
     unit_columns("P_th", "thermal", values["P_th"])
     unit_columns("u_th", "thermal", values["u_th"])
     unit_columns("P_gas", "gas", values["P_gas"])
@@ -509,9 +509,9 @@ def write_timeseries_csv(inp, solution) -> None:
     hydro_curt = values["E_hyd_curt"]
     for period_index, unit_index in enumerate(period_unit):
         key = reservoir_keys[int(unit_index)]
-        month = inp.Time[period_hours[period_index][0]].strftime("%Y%m")
+        month = inp.time.Time[period_hours[period_index][0]].strftime("%Y%m")
         cols[f"E_hyd_curt_{key}_{month}"] = np.full(
-            inp.T, hydro_curt[period_index, 0])
+            inp.time.T, hydro_curt[period_index, 0])
 
     for prefix, key in (
             ("P_fr_wind_out", "P_fr_wind_out"),
@@ -522,7 +522,7 @@ def write_timeseries_csv(inp, solution) -> None:
     unit_columns("E_fr", "friendly", values["E_fr"], skip=1)
 
     import config
-    path = config.RESULT_DIR / f"时序结果_T{inp.T}.csv"
+    path = config.RESULT_DIR / f"时序结果_T{inp.time.T}.csv"
     import pandas as pd
     pd.DataFrame(cols).to_csv(path, index=False, encoding="utf-8")
     print("已导出: %s" % path)

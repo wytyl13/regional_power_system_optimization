@@ -25,7 +25,7 @@ sys.path.insert(0, str(HERE.parent / "service"))
 import numpy as np
 
 import config
-import reader
+import reader_new
 from solve import solve
 from solution import compute_metrics, write_result_json
 from assemble import build_analysis
@@ -37,7 +37,7 @@ def main():
     if config.MIGAP > 0.01:
         config.MIGAP = 0.01
     print(f"自检规模: T={config.T} MIPGap={config.MIGAP}")
-    inp = reader.load_inputs()
+    inp = reader_new.load_inputs()
     solution = solve(inp)
     obj = solution.four_items["objective"]["value"]
     if obj is None:

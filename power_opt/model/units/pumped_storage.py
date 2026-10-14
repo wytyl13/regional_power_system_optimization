@@ -18,7 +18,7 @@ from dataclasses import dataclass
 import gurobipy as gp
 
 import config
-from reader import _read, _zstr, Inputs
+from power_opt.reader import _read, _zstr, Inputs
 
 
 @dataclass
@@ -42,7 +42,7 @@ class PSInputs:
 
 def load_ps(inp: Inputs) -> PSInputs:
     """镜像 MATLAB 1.5 节（176-200）。缺列缺值即报错。"""
-    T = inp.T
+    T = inp.time.T
     mtn_ps = inp.maintenance[inp.maintenance["Type"].astype(str) == "抽水蓄能"]
 
     req_ps = ["UnitKey", "SUBSTR(C.ID，12)", "CAP", "PUMP_MIN_MW", "MAX_POWER_CHARGE",
@@ -51,7 +51,7 @@ def load_ps(inp: Inputs) -> PSInputs:
     psData = _read(config.UNIT_FILE, "抽水蓄能", req_ps)
     N_ps = len(psData)
     zone_ps = [_zstr(v) for v in psData["SUBSTR(C.ID，12)"]]
-    areaPos = {a: i for i, a in enumerate(inp.AreaID)}
+    areaPos = {a: i for i, a in enumerate(inp.areas.AreaID)}
     if miss := [z for z in zone_ps if z not in areaPos]:
         raise KeyError(f"抽蓄分区编号 {set(miss)} 不在分区表中")
     area_ps = np.array([areaPos[z] for z in zone_ps], dtype=int)
@@ -64,7 +64,7 @@ def load_ps(inp: Inputs) -> PSInputs:
     E_ps_max = f("ENERGY_MWH")
     SOC_ps_min = f("SOC_MIN"); SOC_ps_max = f("SOC_MAX"); SOC_ps_initial = f("SOC_INITIAL")
     E_ps_initial = E_ps_max * SOC_ps_initial                     # MATLAB 190
-    c_ps_FOM = inp.fixedCostScale * f("FOM_COST_PERIOD")
+    c_ps_FOM = inp.econ.fixedCostScale * f("FOM_COST_PERIOD")
 
     m_ps = np.zeros((N_ps, T))
     keyPos = {k: i for i, k in enumerate(UnitKey_ps)}
@@ -72,7 +72,7 @@ def load_ps(inp: Inputs) -> PSInputs:
         key = str(plan["UnitKey"])
         if key not in keyPos:
             raise KeyError(f"检修计划机组 {key} 不在抽蓄表中（不猜、不忽略）")
-        periods = (inp.Time >= plan["StartTime"]) & (inp.Time < plan["EndTime"])
+        periods = (inp.time.Time >= plan["StartTime"]) & (inp.time.Time < plan["EndTime"])
         m_ps[keyPos[key], periods] = 1
 
     for name, arr in [("P_ps_max", P_ps_max), ("E_ps_initial", E_ps_initial),
@@ -128,7 +128,7 @@ def add_constraints(m: gp.Model, ps: PSInputs, var: PSVars,
     数据特性（已核）：25 台 3 档容量 200/400/50；PUMP_MIN=MAX_CHARGE=CAP；
     eta 0.8/0.8；检修 4 月/11 月不在 1 月窗口 → m_ps 全 0（841 右端常数 1）。
     对账来源：MATLAB log 减法 192,410 − 183,042 − 268(电储能) = 9,100。"""
-    N, T, Delta_t = ps.N_ps, ps.m_ps.shape[1], inp.Delta_t
+    N, T, Delta_t = ps.N_ps, ps.m_ps.shape[1], inp.time.Delta_t
     Pgen, Ppump = var.P_ps_gen, var.P_ps_pump
     ugen, upump = var.u_ps_gen, var.u_ps_pump
     R, E = var.R_ps_hot, var.E_ps
@@ -169,7 +169,7 @@ def add_constraints(m: gp.Model, ps: PSInputs, var: PSVars,
     m.addConstr(0 <= R, name="R_lb")
     m.addConstr(Pgen + R <= Pmax * ugen, name="R_ub")
     # ---- MATLAB 858：备用能量限制 rd·R <= eta_gen·(E(2:T+1)-Emin) ----
-    rd = inp.reserveDuration[inp.areaProvince[ps.area_ps]]        # 省级参数领行
+    rd = inp.prov.reserveDuration[inp.areas.areaProvince[ps.area_ps]]        # 省级参数领行
     rdT = np.repeat(np.asarray(rd, float)[:, None], T, axis=1)
     eta_gen = np.repeat(ps.eta_ps_gen[:, None], T, axis=1)
     EminT = np.repeat((ps.E_ps_max * ps.SOC_ps_min)[:, None], T, axis=1)
@@ -177,7 +177,7 @@ def add_constraints(m: gp.Model, ps: PSInputs, var: PSVars,
 
 
 if __name__ == "__main__":
-    import reader
+    import power_opt.reader as reader
     inp = reader.load_inputs()
     ps = load_ps(inp)
     print('输入自检: N_ps=%d, m_ps sum=%s, FOM常数=%.2f, 容量和=%.0f MW'
@@ -201,7 +201,7 @@ if __name__ == "__main__":
     add_constraints(m, ps, Pv, inp, Sv)
     m.update()
     exp_rows = 13 * N * T + 2 * N * (T + 1) + 2 * N   # 13 块 + E 界×2 + 首末×2
-    sys_mu_rows = inp.Narea * T                       # u_ps_area_mu（Narea×T 行）
+    sys_mu_rows = inp.areas.Narea * T                       # u_ps_area_mu（Narea×T 行）
     actual_rows = m.NumConstrs - sys_mu_rows
     print('抽蓄约束行数  期望=%d  实际=%d' % (exp_rows, actual_rows))
     assert actual_rows == exp_rows, '行数与手推账本不符'

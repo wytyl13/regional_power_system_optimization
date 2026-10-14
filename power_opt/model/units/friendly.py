@@ -18,7 +18,7 @@ from dataclasses import dataclass
 import gurobipy as gp
 
 import config
-from reader import _read, _zstr, _to_hours, Inputs
+from power_opt.reader import _read, _zstr, _to_hours, Inputs
 
 
 @dataclass
@@ -51,7 +51,7 @@ def load_fr(inp: Inputs) -> FrInputs:
     frData = _read(config.UNIT_FILE, "新能源友好电站", req_fr)
     N_fr = len(frData)
     zone_fr = [_zstr(v) for v in frData["AreaID"]]
-    areaPos = {a: i for i, a in enumerate(inp.AreaID)}
+    areaPos = {a: i for i, a in enumerate(inp.areas.AreaID)}
     if miss := [z for z in zone_fr if z not in areaPos]:
         raise KeyError(f"友好电站分区编号 {set(miss)} 不在分区表中")
     area_fr = np.array([areaPos[z] for z in zone_fr], dtype=int)
@@ -72,13 +72,13 @@ def load_fr(inp: Inputs) -> FrInputs:
     # ---- 友好电站时序（MATLAB 487-493）：逐时匹配，缺时刻即报错 ----
     frTime = _read(config.SYSTEM_FILE, "友好电站时序",
                    ["Time", "UnitKey", "WindAvailable_MW", "PVAvailable_MW"])
-    T = inp.T
+    T = inp.time.T
     P_wind_av = np.zeros((N_fr, T)); P_pv_av = np.zeros((N_fr, T))
     for i, key in enumerate(UnitKey_fr):
         rows = frTime[frTime["UnitKey"].astype(str) == key]
         rows = rows.set_index(_to_hours(rows["Time"]))
         try:
-            sel = rows.loc[inp.Time]
+            sel = rows.loc[inp.time.Time]
         except KeyError as e:
             raise KeyError(f"友好电站时序缺电站 {key} 的时刻 {e}（不补值）") from None
         P_wind_av[i, :] = sel["WindAvailable_MW"].to_numpy(float)   # MATLAB 491
@@ -150,7 +150,7 @@ def add_constraints(m: gp.Model, fr: FrInputs, var: FrVars,
     充放 lb 1 元 + ub 2 元、互斥 2 元、递推 4 元 → 27×NT + E 界 + 首末。"""
     if fr.N_fr == 0:                                              # MATLAB 880 守卫
         return
-    N, Delta_t = fr.N_fr, inp.Delta_t
+    N, Delta_t = fr.N_fr, inp.time.Delta_t
     Pw_out, Pw_ch, Pw_curt = var.P_fr_wind_out, var.P_fr_wind_ch, var.P_fr_wind_curt
     Pv_out, Pv_ch, Pv_curt = var.P_fr_pv_out, var.P_fr_pv_ch, var.P_fr_pv_curt
     Pch, Pdis = var.P_fr_charge, var.P_fr_discharge
@@ -197,13 +197,13 @@ def add_constraints(m: gp.Model, fr: FrInputs, var: FrVars,
 
 
 if __name__ == "__main__":
-    import reader
+    import power_opt.reader as reader
     inp = reader.load_inputs()
     fr = load_fr(inp)
-    T = inp.T
+    T = inp.time.T
     print('输入自检: N_fr=%d, degrade=%.2f 元/MWh吞吐, FOM常数=%.2f'
           % (fr.N_fr, float(fr.c_fr_degrade[0]),
-             float(inp.fixedCostScale * np.sum(fr.fom_wind * fr.wind_cap
+             float(inp.econ.fixedCostScale * np.sum(fr.fom_wind * fr.wind_cap
                                                + fr.fom_pv * fr.pv_cap
                                                + fr.fom_power * fr.P_fr_es_max
                                                + fr.fom_energy * fr.E_fr_max))))  # MATLAB 1063-1066

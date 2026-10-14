@@ -81,12 +81,12 @@ def thermal_analysis(inp, solution):
             "unitKey": str(k), "name": str(n), "type": label,
             "starts": int(V[f"v_{prefix}"][i].sum()),
             "stops": int(V[f"w_{prefix}"][i].sum()),
-            "onlineHours": float(V[f"u_{prefix}"][i].sum() * inp.Delta_t),
+            "onlineHours": float(V[f"u_{prefix}"][i].sum() * inp.time.Delta_t),
             "maintenanceHours": float(np.asarray(U[group]["maintenance"])[i].sum()
-                                      * inp.Delta_t),
-            "energyMWh": float(V[f"P_{prefix}"][i].sum() * inp.Delta_t),
+                                      * inp.time.Delta_t),
+            "energyMWh": float(V[f"P_{prefix}"][i].sum() * inp.time.Delta_t),
             "equivalentFullLoadHours": float(
-                V[f"P_{prefix}"][i].sum() * inp.Delta_t / rated[i]),
+                V[f"P_{prefix}"][i].sum() * inp.time.Delta_t / rated[i]),
         } for i, (k, n) in enumerate(zip(keys, names)))
     return {"thermalSummary": rows}
 
@@ -115,8 +115,8 @@ def storage_analysis(inp, solution):
         keys = u["keys"]
         names = u.get("names", keys)
         for i, (k, n) in enumerate(zip(keys, names)):
-            charge = float(V[ch_key][i].sum() * inp.Delta_t)
-            discharge = float(V[dis_key][i].sum() * inp.Delta_t)
+            charge = float(V[ch_key][i].sum() * inp.time.Delta_t)
+            discharge = float(V[dis_key][i].sum() * inp.time.Delta_t)
             rows.append({
                 "type": label, "unitKey": str(k), "name": str(n),
                 "chargeMWh": charge, "dischargeMWh": discharge,
@@ -134,7 +134,7 @@ def device_analysis(inp, solution):
     """11 类设备全 T 小时电量和最大出力。放电量单列、不解释为一次能源结构；
     友好站只计净上网（风直送+光直送+放电），不与站内量重复计入。"""
     V = solution.values
-    dt = inp.Delta_t
+    dt = inp.time.Delta_t
     fr_net = V["P_fr_wind_out"] + V["P_fr_pv_out"] + V["P_fr_discharge"]
     hydro = np.concatenate([V["P_hyd_ror"], V["P_hyd_res"]], axis=0) \
         if V["P_hyd_ror"].shape[0] else V["P_hyd_res"]   # 空类直接用另一类
@@ -143,7 +143,7 @@ def device_analysis(inp, solution):
         ("生物质", V["P_bio"].sum(axis=0)), ("核电", V["P_nuc"].sum(axis=0)),
         ("常规水电", hydro.sum(axis=0)), ("普通风电", V["P_wind"].sum(axis=0)),
         ("普通光伏", V["P_pv"].sum(axis=0)),
-        ("光热", np.zeros(inp.T)),          # 未建模 → 0
+        ("光热", np.zeros(inp.time.T)),          # 未建模 → 0
         ("新能源友好站净上网", fr_net.sum(axis=0)),
         ("抽蓄发电", V["P_ps_gen"].sum(axis=0)),
         ("独立储能放电", V["P_es_discharge"].sum(axis=0)),
@@ -211,13 +211,13 @@ def build_views(inp, solution):
     V = solution.values
     U = solution.units
     F = solution.inputs_fields
-    T = inp.T
+    T = inp.time.T
     obj = solution.four_items["objective"]
     plot_end = min(168, T)
-    P_D = inp.P_load - V["P_shift_out"] + V["P_shift_in"] - V["P_cut"]
+    P_D = inp.profiles.P_load - V["P_shift_out"] + V["P_shift_in"] - V["P_cut"]
 
     def ts(a):                              # 时序 → PNG 窗口 list
-        a = np.asarray(a)
+        a = np.asarray(a) + 0.0             # +0.0：负零归一，-0.0 不进 views
         return (a[:, :plot_end] if a.ndim > 1 else a[:plot_end]).tolist()
 
     import plot as PL
@@ -250,8 +250,8 @@ def build_views(inp, solution):
         ("发电曲线", P_D_row + V["P_ps_pump"].sum(axis=0)
                      + V["P_es_charge"].sum(axis=0), False),
         ("修正后负荷曲线", P_D_row, False),
-        ("需求响应", inp.P_load.sum(axis=0) - P_D_row, False),
-        ("送电曲线", ZT, False), ("本地负荷", inp.P_load.sum(axis=0), False),
+        ("需求响应", inp.profiles.P_load.sum(axis=0) - P_D_row, False),
+        ("送电曲线", ZT, False), ("本地负荷", inp.profiles.P_load.sum(axis=0), False),
         ("水火备用", V["R_th_hot"].sum(axis=0) + V["R_hyd_hot"].sum(axis=0), False),
         ("旋转备用", ZT, False),   # 省级备用列老版常量近似，数值见 report.hotReserveMarginMW
         ("核电压出力", ZT, False), ("弃水", ZT, False), ("调峰不足", ZT, False),
@@ -278,21 +278,21 @@ def build_views(inp, solution):
     scopes = PL._scopes(inp)
     panels = []
     for scopeName, M in scopes:                   # 海南单分区 → 1 个 panel
-        all_cols = {PL.DEVICE_NAMES[k]: (M @ device[:, :plot_end, k]).ravel().tolist()
+        all_cols = {PL.DEVICE_NAMES[k]: (M @ device[:, :plot_end, k] + 0.0).ravel().tolist()
                     for k in range(len(PL.DEVICE_NAMES))}
         visible = [n for n, v in all_cols.items() if any(abs(x) > 0 for x in v)]
         panels.append({
             "type": "stacked", "title": "设备运行（%s）" % scopeName,
             "series": {n: all_cols[n] for n in visible},
             "lines": {"响应后负荷": (M @ P_D[:, :plot_end]).ravel().tolist(),
-                      "原始负荷": (M @ inp.P_load[:, :plot_end]).ravel().tolist()},
+                      "原始负荷": (M @ inp.profiles.P_load[:, :plot_end]).ravel().tolist()},
             "xLabel": "时间（月/日 时:分）", "yLabel": "功率 / MW",
         })
     views["deviceOperation"] = {
         "title": "设备运行",
         "note": "%s 至 %s  |  逐小时出力；充电、抽水及净送出位于负半轴"
-                % (inp.Time[0].strftime("%Y-%m-%d %H:%M"),
-                   inp.Time[plot_end - 1].strftime("%Y-%m-%d %H:%M")),
+                % (inp.time.Time[0].strftime("%Y-%m-%d %H:%M"),
+                   inp.time.Time[plot_end - 1].strftime("%Y-%m-%d %H:%M")),
         "panels": panels,
     }
 
@@ -405,7 +405,7 @@ def build_views(inp, solution):
              + np.asarray(U["friendly"]["pv_available"]).sum(axis=0))
     wind_curt = (V["P_wind_curt"] + V["P_fr_wind_curt"]).sum(axis=0)
     pv_curt = (V["P_pv_curt"] + V["P_fr_pv_curt"]).sum(axis=0)
-    av_e = lambda a: float(np.sum(a) * inp.Delta_t)
+    av_e = lambda a: float(np.sum(a) * inp.time.Delta_t)
     panels = []
     for label, av, curt in [("风电", wind_av, wind_curt),
                             ("光伏", pv_av, pv_curt)]:
@@ -455,7 +455,7 @@ def write_mat(inp, solution, metrics, analysis, path) -> None:
 
     V = solution.values
     U = solution.units
-    T = inp.T
+    T = inp.time.T
     obj = solution.four_items["objective"]
     four = solution.four_items
 
@@ -465,16 +465,16 @@ def write_mat(inp, solution, metrics, analysis, path) -> None:
          "EnergyNotServed_MWh")])
     plot_end_idx = min(168, T) - 1
     r0 = analysis_run[0, 0]
-    r0["StartTime"] = inp.Time[0].strftime("%Y-%m-%d %H:%M")
-    r0["EndTime"] = inp.Time[-1].strftime("%Y-%m-%d %H:%M")
+    r0["StartTime"] = inp.time.Time[0].strftime("%Y-%m-%d %H:%M")
+    r0["EndTime"] = inp.time.Time[-1].strftime("%Y-%m-%d %H:%M")
     r0["Hours"] = T
     r0["Hydrology"] = config.HYDROLOGY_SCENARIO
     r0["TotalCost_Yuan"] = obj["value"]
     r0["SolverInfo"] = ("Successfully solved (GUROBI)" if four["status"] == "OPTIMAL"
                         else four["status"])
     r0["MIPGap"] = obj["mipGapPct"] / 100
-    r0["PlotStartTime"] = inp.Time[0].strftime("%Y-%m-%d %H:%M")
-    r0["PlotEndTime"] = inp.Time[plot_end_idx].strftime("%Y-%m-%d %H:%M")
+    r0["PlotStartTime"] = inp.time.Time[0].strftime("%Y-%m-%d %H:%M")
+    r0["PlotEndTime"] = inp.time.Time[plot_end_idx].strftime("%Y-%m-%d %H:%M")
     r0["EnergyNotServed_MWh"] = metrics["energyNotServed"]
 
     cost_summary = _table(
@@ -534,7 +534,7 @@ def write_mat(inp, solution, metrics, analysis, path) -> None:
     ])
 
     time_cell = np.empty((1, T), dtype=object)
-    for t, ts in enumerate(inp.Time):
+    for t, ts in enumerate(inp.time.Time):
         time_cell[0, t] = ts.strftime("%Y-%m-%d %H:%M")
 
     payload = {
@@ -569,15 +569,15 @@ def write_summary_txt(inp, solution, metrics, analysis, path) -> None:
     cs = analysis["costSummary"]["items"]
     cd = analysis["costDetail"]["items"]
     text = []
-    plot_end = min(168, inp.T) - 1
+    plot_end = min(168, inp.time.T) - 1
     text.append("海南算例分析")
     text.append("仿真起点：%s；共%d小时。"
-                % (inp.Time[0].strftime("%Y-%m-%d %H:%M"), inp.T))
+                % (inp.time.Time[0].strftime("%Y-%m-%d %H:%M"), inp.time.T))
     text.append("总成本：%.4f万元；实际相对求解间隙：%.4f%%。"
                 % (total_wan, obj["mipGapPct"]))
     text.append("时序图窗口：%s 至 %s（小时起点）；统计表覆盖全部求解时段。"
-                % (inp.Time[0].strftime("%Y-%m-%d %H:%M"),
-                   inp.Time[plot_end].strftime("%Y-%m-%d %H:%M")))
+                % (inp.time.Time[0].strftime("%Y-%m-%d %H:%M"),
+                   inp.time.Time[plot_end].strftime("%Y-%m-%d %H:%M")))
     text.append("")
     text.append("一、成本构成（与目标函数一致）")
     for it in cs:
@@ -656,9 +656,9 @@ def plot_analysis_figures(inp, solution, analysis, out_dir) -> list:
 
     V = solution.values
     U = solution.units
-    T = inp.T
+    T = inp.time.T
     plot_rows = np.arange(0, min(168, T))
-    plot_time = inp.Time[plot_rows]
+    plot_time = inp.time.Time[plot_rows]
     ticks = _tick_rows(plot_rows)
     tick_labels = [t.strftime("%m/%d %H:%M") for t in plot_time[ticks]]
     written = []
@@ -778,7 +778,7 @@ def plot_analysis_figures(inp, solution, analysis, out_dir) -> list:
         ax2.set_xticks(bticks)
         # 边界 k = E 列号 k（k=0 是初值 E(:,1)），时刻 = 起点 + (plotRows(1)+k) 小时
         ax2.set_xticklabels([
-            (inp.Time[0] + __import__("datetime").timedelta(
+            (inp.time.Time[0] + __import__("datetime").timedelta(
                 hours=int(plot_rows[0] + b))).strftime("%m/%d %H:%M")
             for b in bticks])
         ax2.set_xlim(0, len(plot_rows)); ax2.set_ylim(0, 100)
@@ -856,7 +856,7 @@ def export_analysis(inp, solution, metrics, analysis=None, result_root=None) -> 
         analysis = build_analysis(inp, solution)
     root = Path(result_root) if result_root else Path(config.RESULT_DIR)
     out_dir = root / "分析结果" / ("%s_%dh_%s" % (
-        inp.Time[0].strftime("%Y%m%d_%H%M"), inp.T,
+        inp.time.Time[0].strftime("%Y%m%d_%H%M"), inp.time.T,
         datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]))
     out_dir.mkdir(parents=True, exist_ok=True)
 

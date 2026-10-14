@@ -19,7 +19,7 @@ from dataclasses import dataclass
 import gurobipy as gp
 
 import config
-from reader import _read, _zstr, Inputs
+from power_opt.reader import _read, _zstr, Inputs
 
 
 @dataclass
@@ -39,7 +39,7 @@ class NuclearInputs:
 
 def load_nuclear(inp: Inputs) -> NuclearInputs:
     """镜像 MATLAB 1.6 节（201-224）。缺列缺值即报错。"""
-    T = inp.T
+    T = inp.time.T
     mtn_nuc = inp.maintenance[inp.maintenance["Type"].astype(str) == "核电"]
 
     req_nuc = ["UnitKey", "SUBSTR(C.ID，12)", "CAP", "MIN_POWER_GEN", "GEN_COST",
@@ -48,26 +48,26 @@ def load_nuclear(inp: Inputs) -> NuclearInputs:
     nucData = _read(config.UNIT_FILE, "核电", req_nuc)
     N_nuc = len(nucData)
     zone_nuc = [_zstr(v) for v in nucData["SUBSTR(C.ID，12)"]]
-    areaPos = {a: i for i, a in enumerate(inp.AreaID)}
+    areaPos = {a: i for i, a in enumerate(inp.areas.AreaID)}
     if miss := [z for z in zone_nuc if z not in areaPos]:
         raise KeyError(f"核电分区编号 {set(miss)} 不在分区表中")
     area_nuc = np.array([areaPos[z] for z in zone_nuc])
     f = lambda c: nucData[c].to_numpy(float)
     UnitKey_nuc = nucData["UnitKey"].astype(str).tolist()
     P_nuc_max = f("CAP"); P_nuc_min = f("MIN_POWER_GEN")
-    c_nuc_gen = inp.costScale * f("GEN_COST")
+    c_nuc_gen = inp.econ.costScale * f("GEN_COST")
     P_nuc_0 = f("INIT_POWER"); RU_nuc = f("RAMP_LIMIT_UP"); RD_nuc = f("RAMP_LIMIT_DOWN")
     m_nuc_0 = f("INIT_MAINTENANCE")
-    c_nuc_FOM = inp.fixedCostScale * f("FOM_COST_PERIOD")
+    c_nuc_FOM = inp.econ.fixedCostScale * f("FOM_COST_PERIOD")
 
     m_nuc = np.zeros((N_nuc, T))
     keyPos = {k: i for i, k in enumerate(UnitKey_nuc)}
-    t_prev = inp.Time[0] - pd.Timedelta(hours=1)   # 起点前 1 小时（MATLAB 225）
+    t_prev = inp.time.Time[0] - pd.Timedelta(hours=1)   # 起点前 1 小时（MATLAB 225）
     for _, plan in mtn_nuc.iterrows():
         key = str(plan["UnitKey"])
         if key not in keyPos:
             raise KeyError(f"检修计划机组 {key} 不在核电表中（不猜、不忽略）")
-        periods = (inp.Time >= plan["StartTime"]) & (inp.Time < plan["EndTime"])
+        periods = (inp.time.Time >= plan["StartTime"]) & (inp.time.Time < plan["EndTime"])
         m_nuc[keyPos[key], periods] = 1
         # MATLAB 225-228：起点前 1 小时已在检修窗口 → 初值覆盖为检修态、功率 0
         if plan["StartTime"] <= t_prev < plan["EndTime"]:
@@ -140,7 +140,7 @@ def add_constraints(m: gp.Model, nuc: NuclearInputs, var: NuclearVars) -> None:
 
 
 if __name__ == "__main__":
-    import reader
+    import power_opt.reader as reader
     inp = reader.load_inputs()
     nuc = load_nuclear(inp)
     print('输入自检: N_nuc=%d, m_nuc sum=%s, FOM常数=%.2f'

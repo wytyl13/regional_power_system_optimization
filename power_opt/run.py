@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import config
-import reader
+import power_opt.reader as reader
 from solution import SolutionData, compute_metrics, write_result_json
 from solve import solve
 

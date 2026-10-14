@@ -17,8 +17,12 @@ import matplotlib
 matplotlib.use("Agg")                       # 无屏服务器/命令行环境也可出图
 import matplotlib.pyplot as plt
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import config
-import reader
+from power_opt import reader
 
 # MATLAB 1203-1206 plotDeviceNames（21 列，顺序即堆叠顺序）
 DEVICE_NAMES = ['煤电', '气电', '生物质', '径流式水电', '库容式水电',
@@ -41,11 +45,11 @@ def build_device_data(inp, solution):
     光热/省间互济/既定跨区：未建模或开关关闭 → 0 列（债，待对应模块接入）。"""
     Z = lambda *shape: np.zeros(shape)                      # 未建模电源列 = 0
     def A(n, area):                                         # 分区归属矩阵 (Narea,n)，同 solve 残差自检
-        M = Z(inp.Narea, n); M[area, np.arange(n)] = 1
+        M = Z(inp.areas.Narea, n); M[area, np.arange(n)] = 1
         return M
-    A_line = Z(inp.Narea, inp.N_line)
-    A_line[inp.line_from, np.arange(inp.N_line)] = -1
-    A_line[inp.line_to, np.arange(inp.N_line)] = 1
+    A_line = Z(inp.areas.Narea, inp.lines.N_line)
+    A_line[inp.lines.line_from, np.arange(inp.lines.N_line)] = -1
+    A_line[inp.lines.line_to, np.arange(inp.lines.N_line)] = 1
     V = solution.values
     area = lambda name: solution.units[name]["area"]
     count = lambda name: len(solution.units[name]["keys"])
@@ -56,7 +60,7 @@ def build_device_data(inp, solution):
         A(count("hydro_ror"), area("hydro_ror")) @ V["P_hyd_ror"],  # 径流式水电
         A(count("hydro_reservoir"), area("hydro_reservoir")) @ V["P_hyd_res"],  # 库容式水电
         A(count("nuclear"), area("nuclear")) @ V["P_nuc"],    # 核电
-        V["P_wind"], V["P_pv"], Z(inp.Narea, inp.T),         # 风电/光伏/光热(未建模)
+        V["P_wind"], V["P_pv"], Z(inp.areas.Narea, inp.time.T),         # 风电/光伏/光热(未建模)
         A(count("friendly"), area("friendly")) @ (V["P_fr_wind_out"]
                                                   + V["P_fr_wind_ch"]),
         A(count("friendly"), area("friendly")) @ (V["P_fr_pv_out"]
@@ -67,21 +71,21 @@ def build_device_data(inp, solution):
         -A(count("pumped_storage"), area("pumped_storage")) @ V["P_ps_pump"],
         -A(count("electrochemical"), area("electrochemical")) @ V["P_es_charge"],
         -A(count("friendly"), area("friendly")) @ V["P_fr_charge"],
-        A_line @ V["P_line"], Z(inp.Narea, inp.T),           # 省内净交换/省间互济(开关关)
-        Z(inp.Narea, inp.T), V["P_shed"]], axis=2)            # 既定跨区(开关关)/未供电负荷
+        A_line @ V["P_line"], Z(inp.areas.Narea, inp.time.T),           # 省内净交换/省间互济(开关关)
+        Z(inp.areas.Narea, inp.time.T), V["P_shed"]], axis=2)            # 既定跨区(开关关)/未供电负荷
 
 
 def _scopes(inp):
     """MATLAB 1217-1224：作用域列表 [(名称, 1×Narea 汇总矩阵)]。
     全系统 (+多省时省级汇总) + (Narea>1 时各分区)；海南单分区 → 只有全系统。"""
-    scopes = [("全系统", np.ones((1, inp.Narea)))]
-    if inp.Nprovince > 1:
-        A_prov = np.zeros((inp.Nprovince, inp.Narea))
-        A_prov[inp.areaProvince, np.arange(inp.Narea)] = 1
-        scopes += [(f"{p}省级汇总", A_prov[i:i + 1]) for i, p in enumerate(inp.ProvinceID)]
-    if inp.Narea > 1:                                          # 1223：单分区不出分区图
-        scopes += [(f"{name}分区", np.eye(inp.Narea)[i:i + 1])
-                   for i, name in enumerate(inp.AreaName)]
+    scopes = [("全系统", np.ones((1, inp.areas.Narea)))]
+    if inp.areas.Nprovince > 1:
+        A_prov = np.zeros((inp.areas.Nprovince, inp.areas.Narea))
+        A_prov[inp.areas.areaProvince, np.arange(inp.areas.Narea)] = 1
+        scopes += [(f"{p}省级汇总", A_prov[i:i + 1]) for i, p in enumerate(inp.areas.ProvinceID)]
+    if inp.areas.Narea > 1:                                          # 1223：单分区不出分区图
+        scopes += [(f"{name}分区", np.eye(inp.areas.Narea)[i:i + 1])
+                   for i, name in enumerate(inp.areas.AreaName)]
     return scopes
 
 
@@ -93,20 +97,20 @@ def write_chart_csv(inp, solution, path=None):
     前端按 PNG 的 visibleDevices 逻辑隐藏即可。"""
     device = build_device_data(inp, solution)
     V = solution.values
-    P_D = inp.P_load - V["P_shift_out"] + V["P_shift_in"] \
+    P_D = inp.profiles.P_load - V["P_shift_out"] + V["P_shift_in"] \
         - V["P_cut"]                                        # MATLAB 1240 plotNetLoad
     # 与 plot_operation 同款自检：21 列逐点合计 ≈ 响应后负荷，漏列立刻报警
     assert np.abs(device.sum(axis=2) - P_D).max() < 1e-3, "21 列合计≠响应后负荷：有设备列漏画"
     scopes = _scopes(inp)
     sfx = lambda name: f"{name}_{scopeName}" if len(scopes) > 1 else name
-    cols = {"Time": [ts.strftime("%Y-%m-%d %H:%M") for ts in inp.Time]}
+    cols = {"Time": [ts.strftime("%Y-%m-%d %H:%M") for ts in inp.time.Time]}
     for scopeName, M in scopes:                # 每个作用域一组列（海南仅"全系统"一组，列名不带后缀）
         for k, name in enumerate(DEVICE_NAMES):
             cols[sfx(name)] = (M @ device[:, :, k]).ravel()
         cols[sfx("响应后负荷")] = (M @ P_D).ravel()
-        cols[sfx("原始负荷")] = (M @ inp.P_load).ravel()
+        cols[sfx("原始负荷")] = (M @ inp.profiles.P_load).ravel()
     if path is None:
-        path = config.RESULT_DIR / f"设备运行数据_T{inp.T}.csv"
+        path = config.RESULT_DIR / f"设备运行数据_T{inp.time.T}.csv"
     pd.DataFrame(cols).to_csv(path, index=False, encoding="utf-8-sig")
     print("已导出:", path)
 
@@ -115,10 +119,10 @@ def plot_operation(inp, solution, save_png=False):
     """MATLAB 1217-1299：全系统（+多省时省级，+Narea>1 时各分区）设备运行堆叠图。
     海南单分区 → 只有"全系统"1 张图。"""
     # MATLAB 1195-1196：默认展示前 168 小时
-    plotRows = np.arange(0, min(168, inp.T))
-    plotTime = inp.Time[plotRows]
+    plotRows = np.arange(0, min(168, inp.time.T))
+    plotTime = inp.time.Time[plotRows]
     device = build_device_data(inp, solution)
-    P_D = inp.P_load - solution.values["P_shift_out"] \
+    P_D = inp.profiles.P_load - solution.values["P_shift_out"] \
         + solution.values["P_shift_in"] - solution.values["P_cut"]
     # 自检：21 列逐点合计 ≈ 响应后负荷（与 solve 残差同一恒等式），漏列立刻报警
     assert np.abs(device.sum(axis=2) - P_D).max() < 1e-3, "21 列合计≠响应后负荷：有设备列漏画"
@@ -128,7 +132,7 @@ def plot_operation(inp, solution, save_png=False):
         bars = np.einsum("ar,rtc->tc", M, device[ :, plotRows, :])   # scope×device 汇总
         bars[np.abs(bars) < 1e-6] = 0                          # 1226 浮点噪声置 0
         visible = np.any(np.abs(bars) > 0, axis=0)             # 1227 visibleDevices
-        origLoad = (M @ inp.P_load[:, plotRows]).ravel()        # 1228
+        origLoad = (M @ inp.profiles.P_load[:, plotRows]).ravel()        # 1228
         actLoad = (M @ P_D[:, plotRows]).ravel()                # 1229
 
         fig = plt.figure(figsize=(14.5, 7.0), facecolor="w")     # Position 1450x700
