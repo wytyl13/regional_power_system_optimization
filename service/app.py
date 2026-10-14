@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Optional
 
 # 须在 import power_opt（连带 gurobipy/matplotlib）之前设好
-os.environ.setdefault("GRB_LICENSE_FILE", r"C:\gurobi1300\win64\bin\gurobi.lic")
+os.environ.setdefault("GRB_LICENSE_FILE", r"C:\gurobi1103\win64\bin\gurobi.lic")
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 import pandas as pd
