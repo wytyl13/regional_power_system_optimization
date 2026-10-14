@@ -39,7 +39,7 @@ from pydantic import BaseModel
 
 from assemble import (RunConfig, build_analysis, po_build_views,
                       po_last_result_dir, po_run)
-from convert import _included, convert
+from convert import _included, _pick, convert
 from defaults import FIXED_PARAMS, build_form, merge_config
 from parse_template import parse_template
 from shared.errors import (ConflictError, NotFoundError, ValidationError,
@@ -221,7 +221,8 @@ def _job_dir(job_id: str) -> Path | None:
 
 def _disk_summary(job_dir: Path, with_report: bool = False) -> dict:
     """从落盘文件还原任务摘要（服务重启后 JOBS 内存态丢失，以盘为准）。
-    interrupted = 目录存在但既无 solution.json 也无 error.log（多为重启打断）。"""
+    interrupted = 目录存在但既无 solution.json 也无 error.log（多为重启打断）。
+    """
     job_id = job_dir.name
     try:
         submitted = pd.to_datetime(job_id[4:19], format="%Y%m%d_%H%M%S") \
@@ -250,7 +251,6 @@ def _disk_summary(job_dir: Path, with_report: bool = False) -> dict:
     return {"jobId": job_id, "status": "interrupted", "submittedAt": submitted}
 
 
-# ponytail: 列表逐个读 solution.json（每个 ~1MB），任务上百变慢时再落小摘要文件
 @app.get("/api/jobs")
 def list_jobs():
     jobs = []
@@ -320,10 +320,10 @@ def _run_job(job_id: str):
     # 4 个模板浮出键不在 DEFAULT_CONFIG，按 convert 同语义补（用户未给 → 模板收资值），
     # 与 /api/datasets 上传端点的 config 字段集对齐
     p, u = ds["parsed"], job["userConfig"] or {}
-    cfg["province"]["hotReserveRatio"] = u.get("province", {}).get("hotReserveRatio", p["hotReserveRatio"])
-    cfg["province"]["coldReserveRatio"] = u.get("province", {}).get("coldReserveRatio", p["coldReserveRatio"])
-    cfg["demandResponse"]["shiftRatio"] = u.get("demandResponse", {}).get("shiftRatio", p["drShiftRatio"])
-    cfg["demandResponse"]["cutRatio"] = u.get("demandResponse", {}).get("cutRatio", p["drCutRatio"])
+    cfg["province"]["hotReserveRatio"] = _pick(u.get("province", {}).get("hotReserveRatio"), p["hotReserveRatio"])
+    cfg["province"]["coldReserveRatio"] = _pick(u.get("province", {}).get("coldReserveRatio"), p["coldReserveRatio"])
+    cfg["demandResponse"]["shiftRatio"] = _pick(u.get("demandResponse", {}).get("shiftRatio"), p["drShiftRatio"])
+    cfg["demandResponse"]["cutRatio"] = _pick(u.get("demandResponse", {}).get("cutRatio"), p["drCutRatio"])
     sc = cfg["scenario"]
     # 显式接口：RunConfig 传参，算法包内自己落到 config（不再服务侧改写模块属性）
     run_cfg = RunConfig(
@@ -372,6 +372,7 @@ def _worker():
         try:
             _run_job(job_id)
         except Exception as e:      # 服务边界：任何异常都落 failed + error.log，不崩 worker
+            import traceback
             job["status"], job["error"] = "failed", f"{type(e).__name__}: {e}"
             try:
                 (Path(job["jobDir"]) / "error.log").write_text(

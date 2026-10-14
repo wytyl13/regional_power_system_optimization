@@ -98,6 +98,11 @@ def _pct(x: float) -> str:
     return f"{int(v)}%" if v == int(v) else f"{v:g}%"
 
 
+def _pick(v, default):
+    """None（前端显式传 null）视为未提供，回落收资值；0 是合法值，不能用 or。"""
+    return default if v is None else v
+
+
 def _num(x: float) -> str:
     return str(int(x)) if float(x) == int(x) else f"{x:g}"
 
@@ -153,11 +158,11 @@ def convert(parsed: dict, user_config: dict | None, out_dir) -> dict:
     # 收资值优先于内置默认、用户键优先于收资值
     user = user_config or {}
     dr_u = user.get("demandResponse", {})
-    shiftRatio = dr_u.get("shiftRatio", parsed["drShiftRatio"])
-    cutRatio = dr_u.get("cutRatio", parsed["drCutRatio"])
+    shiftRatio = _pick(dr_u.get("shiftRatio"), parsed["drShiftRatio"])
+    cutRatio = _pick(dr_u.get("cutRatio"), parsed["drCutRatio"])
     prov_u = user.get("province", {})
-    hotRatio = prov_u.get("hotReserveRatio", parsed["hotReserveRatio"])
-    coldRatio = prov_u.get("coldReserveRatio", parsed["coldReserveRatio"])
+    hotRatio = _pick(prov_u.get("hotReserveRatio"), parsed["hotReserveRatio"])
+    coldRatio = _pick(prov_u.get("coldReserveRatio"), parsed["coldReserveRatio"])
 
     u_cfg, e_cfg = cfg["units"], cfg["emission"]
     excluded: list[dict] = []   # 未纳入机组（记录原因，供 warnings）
