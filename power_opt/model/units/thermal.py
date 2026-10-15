@@ -85,6 +85,9 @@ def _col_repmat(coal: CoalInputs, col: np.ndarray, T: int) -> np.ndarray:
 class Thermal:
     """煤电单元：inputs/vars 为实例属性，四步生命周期依次组装进模型。"""
 
+    inputs: CoalInputs      # 煤电输入（load 后生效）
+    vars: ThermalVars       # 煤电决策变量（add_vars 后生效）
+
     def load(self, inp: Inputs) -> None:
         """镜像 MATLAB 1.3 节（87-135）+ 六节点派生（105-106）加载煤电输入。
         缺列缺值即报错；结果存 self.inputs。
