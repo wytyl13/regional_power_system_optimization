@@ -52,8 +52,12 @@ def build(m: gp.Model, inp: reader.Inputs):
     bi = BI.Biomass()                   # 生物质已类化
     bi.load(inp)
     bio = bi.inputs
-    ps = PS.load_ps(inp)
-    es = ES.load_es(inp)
+    pst = PS.PumpedStorage()            # 抽蓄已类化
+    pst.load(inp)
+    ps = pst.inputs
+    ech = ES.Electrochemical()          # 电储能已类化
+    ech.load(inp)
+    es = ech.inputs
     hyd = HY.load_hyd(inp)
     fr = FR.load_fr(inp)
     
@@ -61,8 +65,8 @@ def build(m: gp.Model, inp: reader.Inputs):
     Gv = ga.add_vars(m)
     Nv = nu.add_vars(m)
     Bv = bi.add_vars(m)
-    Pv = PS.add_vars(m, ps)
-    Ev = ES.add_vars(m, es, inp.time.T)
+    Pv = pst.add_vars(m)
+    Ev = ech.add_vars(m)
     Hv = HY.add_vars(m, hyd, inp.time.T)
     Fv = FR.add_vars(m, fr, inp.time.T)
     Sv = CT.add_vars(m, inp)
@@ -74,16 +78,17 @@ def build(m: gp.Model, inp: reader.Inputs):
     ga.add_constraints(m, inp)         # 气电类化；建序不变
     nu.add_constraints(m, inp)         # 核电类化；建序不变
     bi.add_constraints(m, inp)         # 生物质类化；建序不变
-    PS.add_constraints(m, ps, Pv, inp, Sv)
-    ES.add_constraints(m, es, Ev, inp, inp.time.T)
+    pst.add_constraints(m, inp, Sv)    # 抽蓄类化；建序不变
+    ech.add_constraints(m, inp)        # 电储能类化；建序不变
     HY.add_constraints(m, hyd, Hv, inp, inp.time.T)
     FR.add_constraints(m, fr, Fv, inp, inp.time.T)
     CT.add_constraints(m, inp, Sv, units, coal, gas, nuc, bio, ps, es, hyd, fr)
-    return coal, gas, nuc, bio, ps, es, hyd, fr, th, ga, nu, bi, Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv, units
+    return coal, gas, nuc, bio, ps, es, hyd, fr, th, ga, nu, bi, pst, ech, Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv, units
 
 
 def add_objective(m: gp.Model, inp: reader.Inputs, th: TH.Thermal, ga: GA.Gas,
-                  nu: NU.Nuclear, bi: BI.Biomass,
+                  nu: NU.Nuclear, bi: BI.Biomass, pst: PS.PumpedStorage,
+                  ech: ES.Electrochemical,
                   coal: TH.CoalInputs,
                   gas: GA.GasInputs, nuc: NU.NuclearInputs, bio: BI.BiomassInputs,
                   ps: PS.PSInputs, es: ES.ESInputs, hyd: HY.HydInputs, fr: FR.FrInputs,
@@ -118,16 +123,12 @@ def add_objective(m: gp.Model, inp: reader.Inputs, th: TH.Thermal, ga: GA.Gas,
     bi_cost = bi.add_cost(Delta_t, inp.econ)
     C_bio = bi_cost["C_bio"]; C_bio_gen = bi_cost["C_bio_gen"]; C_bio_FOM = bi_cost["C_bio_FOM"]
 
-    # ---- 4.5 电化学储能（1046-1049）----
-    # 1047: Delta_t*sum(c'*(P_ch+P_dis))，拆两次 _wsum 数值等价（MLinExpr 不进 _wsum）
-    C_es_degrade = Delta_t * (_wsum(es.c_es_degrade, Ev.P_es_charge, T)
-                              + _wsum(es.c_es_degrade, Ev.P_es_discharge, T))   # 1047
-    C_es_FOM = float(np.sum(es.c_es_FOM * es.P_es_max
-                            + es.c_es_energy_FOM * es.E_es_max))          # 1048 常数
-    C_es = C_es_degrade + C_es_FOM                                         # 1049
+    # ---- 4.5 电化学储能（1046-1049）：类化后由单元 add_cost 产出 ----
+    es_cost = ech.add_cost(Delta_t, inp.econ)
+    C_es = es_cost["C_es"]; C_es_degrade = es_cost["C_es_degrade"]; C_es_FOM = es_cost["C_es_FOM"]
 
-    # ---- 4.6 抽水蓄能（1051-1052）----
-    C_ps = float(np.sum(ps.c_ps_FOM * ps.P_ps_max))               # 1052 仅 FOM，无变动成本
+    # ---- 4.6 抽水蓄能（1051-1052）：类化后由单元 add_cost 产出 ----
+    C_ps = pst.add_cost(Delta_t, inp.econ)["C_ps"]               # 1052 仅 FOM，无变动成本
 
     # ---- 4.4 水电（1040-1044）----
     C_hyd = float(inp.econ.fixedCostScale
@@ -205,8 +206,8 @@ def add_objective(m: gp.Model, inp: reader.Inputs, th: TH.Thermal, ga: GA.Gas,
 def solve(inp: reader.Inputs):
     """组装 + 求解 + 取值；返回纯数据 SolutionData，不做前端口径组装。"""
     m = gp.Model("coal_gas_nuc_bio_sto_hyd_fr_T%d" % inp.time.T)
-    coal, gas, nuc, bio, ps, es, hyd, fr, th, ga, nu, bi, Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv, units = build(m, inp)
-    cost_exprs = add_objective(m, inp, th, ga, nu, bi, coal, gas, nuc, bio, ps, es, hyd, fr,
+    coal, gas, nuc, bio, ps, es, hyd, fr, th, ga, nu, bi, pst, ech, Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv, units = build(m, inp)
+    cost_exprs = add_objective(m, inp, th, ga, nu, bi, pst, ech, coal, gas, nuc, bio, ps, es, hyd, fr,
                                Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv)
     m.update()
 

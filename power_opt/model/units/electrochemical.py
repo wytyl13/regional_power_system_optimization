@@ -1,10 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-@Time    : 2026/09/24 09:10
+@Time    : 2026/10/15 16:35
 @Author  : weiyutao
 @File    : electrochemical.py
-电化学储能模块：一比一对照 MATLAB 1.16 / 2.5 / 3.5 / 4.5。
+电化学储能单元：一个类 Electrochemical 自包含四步生命周期
+（load → add_vars → add_constraints → add_cost）。
 读取的表：分区机组信息表[电化学储能]（AreaID 分区列，非 SUBSTR）。
 与抽蓄的差异：约束 3.5 带 if N_es>0 守卫（坑 1 镜像，守卫逐行照抄不增不删）；
 SOC 递推含自放电 (1-loss)；成本有 degrade 变动项（吞吐量单价，公式含除法）。
@@ -18,66 +19,24 @@ import gurobipy as gp
 
 import config
 from power_opt.reader import _read, _zstr, Inputs
+from model.units.base import _wsum
 
 
 @dataclass
 class ESInputs:
     """MATLAB 1.16 节工作区变量的镜像；变量名与 MATLAB 一致。"""
-    N_es: int
-    UnitKey_es: list
-    name_es: list                # 机组名（八~十一节分析表用，MATLAB esData.NAME）
-    area_es: np.ndarray           # 机组 → 分区（0 基，AreaID 列）
-    P_es_max: np.ndarray          # MW
-    E_es_max: np.ndarray; E_es_min: np.ndarray; E_es_upper: np.ndarray
-    E_es_initial: np.ndarray      # = E_es_max × SOC_INITIAL（MATLAB 386）
-    eta_es_ch: np.ndarray; eta_es_dis: np.ndarray
-    loss_es: np.ndarray           # 自放电率
-    c_es_degrade: np.ndarray      # 元/MWh 吞吐量（MATLAB 388-389，公式含除法）
-    c_es_FOM: np.ndarray          # 本周期功率运维，元/MW
-    c_es_energy_FOM: np.ndarray   # 本周期能量运维，元/MWh
-
-
-def load_es(inp: Inputs) -> ESInputs:
-    """镜像 MATLAB 1.16 节（380-396）。缺列缺值即报错。"""
-    req_es = ["UnitKey", "AreaID", "CAP", "ENERGY_MWH", "SOC_MIN", "SOC_MAX",
-              "SOC_INITIAL", "ETA_CHARGE", "ETA_DISCHARGE", "SELF_DISCHARGE",
-              "POWER_COST", "ENERGY_COST", "REPLACE_FACTOR", "MAX_CYCLES",
-              "FOM_COST_PERIOD", "FOM_ENERGY_PERIOD", "NAME"]
-    esData = _read(config.UNIT_FILE, "电化学储能", req_es)
-    N_es = len(esData)
-    zone_es = [_zstr(v) for v in esData["AreaID"]]
-    areaPos = {a: i for i, a in enumerate(inp.areas.AreaID)}
-    if miss := [z for z in zone_es if z not in areaPos]:
-        raise KeyError(f"电储能分区编号 {set(miss)} 不在分区表中")
-    area_es = np.array([areaPos[z] for z in zone_es], dtype=int)
-    f = lambda c: esData[c].to_numpy(float)
-    UnitKey_es = esData["UnitKey"].astype(str).tolist()
-    name_es = esData["NAME"].astype(str).tolist()                 # 八~十一节分析表用
-    P_es_max = f("CAP"); E_es_max = f("ENERGY_MWH")
-    E_es_min = E_es_max * f("SOC_MIN")                    # MATLAB 384
-    E_es_upper = E_es_max * f("SOC_MAX")                  # 385
-    E_es_initial = E_es_max * f("SOC_INITIAL")            # 386
-    eta_es_ch = f("ETA_CHARGE"); eta_es_dis = f("ETA_DISCHARGE")
-    loss_es = f("SELF_DISCHARGE")
-    # MATLAB 388-389：c_es_degrade = (P_max·POWER_COST + E_max·ENERGY_COST)
-    #                          × REPLACE_FACTOR / (2·E_max·MAX_CYCLES)
-    c_es_degrade = ((P_es_max * f("POWER_COST") + E_es_max * f("ENERGY_COST"))
-                    * f("REPLACE_FACTOR") / (2 * E_es_max * f("MAX_CYCLES")))
-    c_es_FOM = inp.econ.fixedCostScale * f("FOM_COST_PERIOD")            # 391
-    c_es_energy_FOM = inp.econ.fixedCostScale * f("FOM_ENERGY_PERIOD")   # 392
-
-    for name, arr in [("P_es_max", P_es_max), ("E_es_initial", E_es_initial),
-                      ("c_es_degrade", c_es_degrade), ("eta_es_ch", eta_es_ch)]:
-        if not np.all(np.isfinite(arr)):
-            raise ValueError(f"{name} 含 NaN/Inf，检查电储能输入表")
-
-    return ESInputs(
-        N_es=N_es, UnitKey_es=UnitKey_es, name_es=name_es, area_es=area_es, P_es_max=P_es_max,
-        E_es_max=E_es_max, E_es_min=E_es_min, E_es_upper=E_es_upper,
-        E_es_initial=E_es_initial, eta_es_ch=eta_es_ch, eta_es_dis=eta_es_dis,
-        loss_es=loss_es, c_es_degrade=c_es_degrade, c_es_FOM=c_es_FOM,
-        c_es_energy_FOM=c_es_energy_FOM,
-    )
+    N_es: int                                   # 机组台数
+    UnitKey_es: list                            # 分区唯一编号
+    name_es: list                               # 机组名（八~十一节分析表用，MATLAB esData.NAME）
+    area_es: np.ndarray                         # 机组 → 分区（0 基，AreaID 列）
+    P_es_max: np.ndarray                        # 功率上限，MW
+    E_es_max: np.ndarray; E_es_min: np.ndarray; E_es_upper: np.ndarray  # 能量上限/下限/上界，MWh
+    E_es_initial: np.ndarray                    # 初始能量 = E_es_max × SOC_INITIAL（MATLAB 386）
+    eta_es_ch: np.ndarray; eta_es_dis: np.ndarray  # 充/放电效率
+    loss_es: np.ndarray                         # 自放电率
+    c_es_degrade: np.ndarray                    # 元/MWh 吞吐量（MATLAB 388-389，公式含除法）
+    c_es_FOM: np.ndarray                        # 本周期功率运维，元/MW
+    c_es_energy_FOM: np.ndarray                 # 本周期能量运维，元/MWh
 
 
 # ------------------- 2.5 决策变量（MATLAB 613-619 行） -------------------
@@ -93,83 +52,178 @@ class ESVars:
     R_es_hot: gp.MVar                                # 热备用，MW
 
 
-def add_vars(m: gp.Model, es: ESInputs, T: int) -> ESVars:
-    """连续变量 lb=-inf、二值变量照 MATLAB 614-619。"""
-    N = es.N_es
-    P_es_charge    = m.addMVar((N, T), lb=-INF, name="P_es_charge")     # 614
-    P_es_discharge = m.addMVar((N, T), lb=-INF, name="P_es_discharge")  # 615
-    u_es_ch  = m.addMVar((N, T), vtype=gp.GRB.BINARY, name="u_es_ch")   # 616
-    u_es_dis = m.addMVar((N, T), vtype=gp.GRB.BINARY, name="u_es_dis")  # 617
-    E_es     = m.addMVar((N, T + 1), lb=-INF, name="E_es")              # 618
-    R_es_hot = m.addMVar((N, T), lb=-INF, name="R_es_hot")              # 619
-    return ESVars(P_es_charge=P_es_charge, P_es_discharge=P_es_discharge,
-                  u_es_ch=u_es_ch, u_es_dis=u_es_dis, E_es=E_es, R_es_hot=R_es_hot)
+class Electrochemical:
+    """电化学储能单元：inputs/vars 为实例属性，四步生命周期依次组装进模型。"""
 
+    inputs: ESInputs      # 电储能输入（load 后生效）
+    vars: ESVars          # 电储能决策变量（add_vars 后生效）
 
-# ------------------- 3.5 电储能约束（MATLAB 817-831 行） -------------------
+    def load(self, inp: Inputs) -> None:
+        """镜像 MATLAB 1.16 节（380-396）加载电储能输入。缺列缺值即报错；
+        结果存 self.inputs。
 
-def add_constraints(m: gp.Model, es: ESInputs, var: ESVars,
-                    inp: Inputs, T: int) -> None:
-    """一比一对照 MATLAB 3.5 节。if N_es>0 守卫逐行照抄（坑 4：T=1 也会暴露）。
-    行数账本（T=24, N=1 → 268 行）：9 个 N×T 块 216（820 上下限×2 对、821 同、
-    822 互斥、823 SOC 递推、827/828 备用、829 备用能量）+ E 界 25×2 + 首末 1×2。
-    非零元账本（484）：24(Pch_lb)+48(Pch_ub)+24(Pdis_lb)+48(Pdis_ub)+48(互斥)
-    +96(递推 每行4元)+50(E界)+2(首末)+24(R_lb)+72(R_ub 三元)+48(R_energy 二元)。
-    对账来源：MATLAB log 减法 192,410 − 183,042 − 9,100(抽蓄) = 268。"""
-    if es.N_es == 0:                                              # MATLAB 819 守卫
-        return
-    N, Delta_t = es.N_es, inp.time.Delta_t
-    Pch, Pdis = var.P_es_charge, var.P_es_discharge
-    uch, udis = var.u_es_ch, var.u_es_dis
-    E, R = var.E_es, var.R_es_hot
-    Pmax = np.repeat(es.P_es_max[:, None], T, axis=1)
+        Args:
+            inp (Inputs): 系统公共输入。
 
-    # ---- MATLAB 820：0 <= P_ch、P_ch <= Pmax·u_ch ----
-    m.addConstr(0 <= Pch, name="Pch_lb")
-    m.addConstr(Pch <= Pmax * uch, name="Pch_ub")
-    # ---- MATLAB 821：0 <= P_dis、P_dis <= Pmax·u_dis ----
-    m.addConstr(0 <= Pdis, name="Pdis_lb")
-    m.addConstr(Pdis <= Pmax * udis, name="Pdis_ub")
-    # ---- MATLAB 822：充放互斥 ----
-    m.addConstr(uch + udis <= 1, name="mutex")
-    # ---- MATLAB 823：SOC 递推（含自放电 1-loss；充 +、放 −）----
-    loss = np.repeat(es.loss_es[:, None], T, axis=1)
-    eta_ch = np.repeat(es.eta_es_ch[:, None], T, axis=1)
-    inv_eta_dis = np.repeat((1.0 / es.eta_es_dis)[:, None], T, axis=1)
-    m.addConstr(E[:, 1:] == (1 - loss) * E[:, :-1]
-                + eta_ch * Pch * Delta_t
-                - inv_eta_dis * Pdis * Delta_t, name="soc")
-    # ---- MATLAB 825：E 界（E_es(:) 展开 N×(T+1) 行）----
-    Emin = np.repeat(es.E_es_min[:, None], T + 1, axis=1)
-    Eup = np.repeat(es.E_es_upper[:, None], T + 1, axis=1)
-    m.addConstr(Emin <= E, name="E_lb")
-    m.addConstr(E <= Eup, name="E_ub")
-    # ---- MATLAB 826：首末能量相等 ----
-    E0 = es.E_es_initial[:, None]
-    m.addConstr(E[:, 0:1] == E0, name="E_init")
-    m.addConstr(E[:, T:T + 1] == E0, name="E_end")
-    # ---- MATLAB 827/828：热备用受放电余量限制（上界 Pmax·(1-u_ch)）----
-    m.addConstr(0 <= R, name="R_lb")
-    m.addConstr(Pdis + R <= Pmax * (1 - uch), name="R_ub")
-    # ---- MATLAB 829：备用能量限制 rd·R <= eta_dis·(E(2:T+1)-Emin) ----
-    rd = inp.prov.reserveDuration[inp.areas.areaProvince[es.area_es]]        # 省级参数领行
-    rdT = np.repeat(np.asarray(rd, float)[:, None], T, axis=1)
-    eta_dis = np.repeat(es.eta_es_dis[:, None], T, axis=1)
-    EminT = np.repeat(es.E_es_min[:, None], T, axis=1)
-    m.addConstr(rdT * R <= eta_dis * (E[:, 1:] - EminT), name="R_energy")
+        Returns:
+            None
+        """
+        req_es = ["UnitKey", "AreaID", "CAP", "ENERGY_MWH", "SOC_MIN", "SOC_MAX",
+                  "SOC_INITIAL", "ETA_CHARGE", "ETA_DISCHARGE", "SELF_DISCHARGE",
+                  "POWER_COST", "ENERGY_COST", "REPLACE_FACTOR", "MAX_CYCLES",
+                  "FOM_COST_PERIOD", "FOM_ENERGY_PERIOD", "NAME"]
+        esData = _read(config.UNIT_FILE, "电化学储能", req_es)
+        N_es = len(esData)
+        zone_es = [_zstr(v) for v in esData["AreaID"]]
+        areaPos = {a: i for i, a in enumerate(inp.areas.AreaID)}
+        if miss := [z for z in zone_es if z not in areaPos]:
+            raise KeyError(f"电储能分区编号 {set(miss)} 不在分区表中")
+        area_es = np.array([areaPos[z] for z in zone_es], dtype=int)
+        f = lambda c: esData[c].to_numpy(float)
+        UnitKey_es = esData["UnitKey"].astype(str).tolist()
+        name_es = esData["NAME"].astype(str).tolist()                 # 八~十一节分析表用
+        P_es_max = f("CAP"); E_es_max = f("ENERGY_MWH")
+        E_es_min = E_es_max * f("SOC_MIN")                    # MATLAB 384
+        E_es_upper = E_es_max * f("SOC_MAX")                  # 385
+        E_es_initial = E_es_max * f("SOC_INITIAL")            # 386
+        eta_es_ch = f("ETA_CHARGE"); eta_es_dis = f("ETA_DISCHARGE")
+        loss_es = f("SELF_DISCHARGE")
+        # MATLAB 388-389：c_es_degrade = (P_max·POWER_COST + E_max·ENERGY_COST)
+        #                          × REPLACE_FACTOR / (2·E_max·MAX_CYCLES)
+        c_es_degrade = ((P_es_max * f("POWER_COST") + E_es_max * f("ENERGY_COST"))
+                        * f("REPLACE_FACTOR") / (2 * E_es_max * f("MAX_CYCLES")))
+        c_es_FOM = inp.econ.fixedCostScale * f("FOM_COST_PERIOD")            # 391
+        c_es_energy_FOM = inp.econ.fixedCostScale * f("FOM_ENERGY_PERIOD")   # 392
+
+        for name, arr in [("P_es_max", P_es_max), ("E_es_initial", E_es_initial),
+                          ("c_es_degrade", c_es_degrade), ("eta_es_ch", eta_es_ch)]:
+            if not np.all(np.isfinite(arr)):
+                raise ValueError(f"{name} 含 NaN/Inf，检查电储能输入表")
+
+        self.inputs = ESInputs(
+            N_es=N_es, UnitKey_es=UnitKey_es, name_es=name_es, area_es=area_es, P_es_max=P_es_max,
+            E_es_max=E_es_max, E_es_min=E_es_min, E_es_upper=E_es_upper,
+            E_es_initial=E_es_initial, eta_es_ch=eta_es_ch, eta_es_dis=eta_es_dis,
+            loss_es=loss_es, c_es_degrade=c_es_degrade, c_es_FOM=c_es_FOM,
+            c_es_energy_FOM=c_es_energy_FOM,
+        )
+        # 无检修矩阵（ESInputs 不含 N×T 量），T 在 load 时缓存供 add_vars 建形
+        self._T = inp.time.T
+
+    def add_vars(self, m: gp.Model) -> ESVars:
+        """镜像 MATLAB 2.5 节（613-619）创建电储能决策变量，存 self.vars。
+        连续变量 lb=-inf、二值变量照 MATLAB 614-619。
+
+        Args:
+            m (gp.Model): Gurobi 模型。
+
+        Returns:
+            ESVars: 决策变量容器（同时存 self.vars，两处同引用）。
+        """
+        es = self.inputs
+        N, T = es.N_es, self._T
+        P_es_charge    = m.addMVar((N, T), lb=-INF, name="P_es_charge")     # 614
+        P_es_discharge = m.addMVar((N, T), lb=-INF, name="P_es_discharge")  # 615
+        u_es_ch  = m.addMVar((N, T), vtype=gp.GRB.BINARY, name="u_es_ch")   # 616
+        u_es_dis = m.addMVar((N, T), vtype=gp.GRB.BINARY, name="u_es_dis")  # 617
+        E_es     = m.addMVar((N, T + 1), lb=-INF, name="E_es")              # 618
+        R_es_hot = m.addMVar((N, T), lb=-INF, name="R_es_hot")              # 619
+        self.vars = ESVars(P_es_charge=P_es_charge, P_es_discharge=P_es_discharge,
+                           u_es_ch=u_es_ch, u_es_dis=u_es_dis, E_es=E_es, R_es_hot=R_es_hot)
+        return self.vars
+
+    def add_constraints(self, m: gp.Model, inp: Inputs, sv=None) -> None:
+        """一比一对照 MATLAB 3.5 节（817-831）添加电储能约束。
+        if N_es>0 守卫逐行照抄（坑 4：T=1 也会暴露）。
+        行数账本见 docstring 内注释。省级备用时长从 inp.prov 领行。
+
+        Args:
+            m (gp.Model): Gurobi 模型。
+            inp (Inputs): 系统公共输入（Delta_t、省级备用时长）。
+            sv (SystemVars): 系统层决策变量（本单元忽略）。
+
+        Returns:
+            None
+        """
+        es = self.inputs
+        var = self.vars
+        if es.N_es == 0:                                              # MATLAB 819 守卫
+            return
+        N, T, Delta_t = es.N_es, var.E_es.shape[1] - 1, inp.time.Delta_t
+        Pch, Pdis = var.P_es_charge, var.P_es_discharge
+        uch, udis = var.u_es_ch, var.u_es_dis
+        E, R = var.E_es, var.R_es_hot
+        Pmax = np.repeat(es.P_es_max[:, None], T, axis=1)
+
+        # ---- MATLAB 820：0 <= P_ch、P_ch <= Pmax·u_ch ----
+        m.addConstr(0 <= Pch, name="Pch_lb")
+        m.addConstr(Pch <= Pmax * uch, name="Pch_ub")
+        # ---- MATLAB 821：0 <= P_dis、P_dis <= Pmax·u_dis ----
+        m.addConstr(0 <= Pdis, name="Pdis_lb")
+        m.addConstr(Pdis <= Pmax * udis, name="Pdis_ub")
+        # ---- MATLAB 822：充放互斥 ----
+        m.addConstr(uch + udis <= 1, name="mutex")
+        # ---- MATLAB 823：SOC 递推（含自放电 1-loss；充 +、放 −）----
+        loss = np.repeat(es.loss_es[:, None], T, axis=1)
+        eta_ch = np.repeat(es.eta_es_ch[:, None], T, axis=1)
+        inv_eta_dis = np.repeat((1.0 / es.eta_es_dis)[:, None], T, axis=1)
+        m.addConstr(E[:, 1:] == (1 - loss) * E[:, :-1]
+                    + eta_ch * Pch * Delta_t
+                    - inv_eta_dis * Pdis * Delta_t, name="soc")
+        # ---- MATLAB 825：E 界（E_es(:) 展开 N×(T+1) 行）----
+        Emin = np.repeat(es.E_es_min[:, None], T + 1, axis=1)
+        Eup = np.repeat(es.E_es_upper[:, None], T + 1, axis=1)
+        m.addConstr(Emin <= E, name="E_lb")
+        m.addConstr(E <= Eup, name="E_ub")
+        # ---- MATLAB 826：首末能量相等 ----
+        E0 = es.E_es_initial[:, None]
+        m.addConstr(E[:, 0:1] == E0, name="E_init")
+        m.addConstr(E[:, T:T + 1] == E0, name="E_end")
+        # ---- MATLAB 827/828：热备用受放电余量限制（上界 Pmax·(1-u_ch)）----
+        m.addConstr(0 <= R, name="R_lb")
+        m.addConstr(Pdis + R <= Pmax * (1 - uch), name="R_ub")
+        # ---- MATLAB 829：备用能量限制 rd·R <= eta_dis·(E(2:T+1)-Emin) ----
+        rd = inp.prov.reserveDuration[inp.areas.areaProvince[es.area_es]]        # 省级参数领行
+        rdT = np.repeat(np.asarray(rd, float)[:, None], T, axis=1)
+        eta_dis = np.repeat(es.eta_es_dis[:, None], T, axis=1)
+        EminT = np.repeat(es.E_es_min[:, None], T, axis=1)
+        m.addConstr(rdT * R <= eta_dis * (E[:, 1:] - EminT), name="R_energy")
+
+    def add_cost(self, dt: float, econ) -> dict:
+        """镜像 MATLAB 4.5 节（1046-1049）汇总电储能成本表达式。
+        1047: Delta_t*sum(c'*(P_ch+P_dis))，拆两次 _wsum 数值等价（MLinExpr 不进 _wsum）。
+        加法顺序冻结，不得重排。键名是对外成本合同，冻结。
+
+        Args:
+            dt (float): 单位步长（小时）。
+            econ (EconomicParams): 系统经济参数（本单元无外部价格项、未用）。
+
+        Returns:
+            dict: 电储能成本表达式与分项（键名与 solve 层成本 dict 一致）。
+        """
+        T = self.vars.E_es.shape[1] - 1
+        var, es = self.vars, self.inputs
+        C_es_degrade = dt * (_wsum(es.c_es_degrade, var.P_es_charge, T)
+                             + _wsum(es.c_es_degrade, var.P_es_discharge, T))   # 1047
+        C_es_FOM = float(np.sum(es.c_es_FOM * es.P_es_max
+                                + es.c_es_energy_FOM * es.E_es_max))          # 1048 常数
+        C_es = C_es_degrade + C_es_FOM                                         # 1049
+        return {"C_es": C_es, "C_es_degrade": C_es_degrade, "C_es_FOM": C_es_FOM}
 
 
 if __name__ == "__main__":
     import power_opt.reader as reader
     inp = reader.load_inputs()
-    es = load_es(inp)
+    ech = Electrochemical()
+    ech.load(inp)
+    es = ech.inputs
     T = inp.time.T
     print('输入自检: N_es=%d, degrade=%.2f 元/MWh吞吐, FOM常数=%.2f'
           % (es.N_es, float(es.c_es_degrade[0]),
              float(np.sum(es.c_es_FOM * es.P_es_max + es.c_es_energy_FOM * es.E_es_max))))
 
     m = gp.Model()
-    Ev = add_vars(m, es, T)
+    ech.add_vars(m)
     m.update()
     N = es.N_es
     exp_cols = 4 * N * T + N * (T + 1) + N * T   # 4 个 N×T + E_es + R_hot
@@ -179,7 +233,7 @@ if __name__ == "__main__":
     assert m.NumVars == exp_cols and m.NumBinVars == exp_bin, '变量清单与推导不符'
     print('电储能变量清单核对通过')
 
-    add_constraints(m, es, Ev, inp, T)
+    ech.add_constraints(m, inp)
     m.update()
     exp_rows = 9 * N * T + 2 * N * (T + 1) + 2 * N   # 9 块 + E 界×2 + 首末×2
     # 逐块每行元数：Pch/Pdis lb=1、ub=2、互斥=2、递推=4、R_lb=1、R_ub=3、

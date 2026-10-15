@@ -244,16 +244,20 @@ if __name__ == "__main__":
     bi = BI.Biomass()                   # 生物质已类化
     bi.load(inp)
     bio = bi.inputs
-    ps = PS.load_ps(inp)
-    es = ES.load_es(inp)
+    pst = PS.PumpedStorage()            # 抽蓄已类化
+    pst.load(inp)
+    ps = pst.inputs
+    ech = ES.Electrochemical()          # 电储能已类化
+    ech.load(inp)
+    es = ech.inputs
     hyd = HY.load_hyd(inp)
     fr = FR.load_fr(inp)
     Tv = th.add_vars(m)
     Gv = ga.add_vars(m)
     Nv = nu.add_vars(m)
     Bv = bi.add_vars(m)
-    Pv = PS.add_vars(m, ps)
-    Ev = ES.add_vars(m, es, inp.time.T)
+    Pv = pst.add_vars(m)
+    Ev = ech.add_vars(m)
     Hv = HY.add_vars(m, hyd, inp.time.T)
     Fv = FR.add_vars(m, fr, inp.time.T)
     Sv = add_vars(m, inp)
@@ -264,8 +268,8 @@ if __name__ == "__main__":
     ga.add_constraints(m, inp)         # 气电类化；建序不变
     nu.add_constraints(m, inp)         # 核电类化；建序不变
     bi.add_constraints(m, inp)         # 生物质类化；建序不变
-    PS.add_constraints(m, ps, Pv, inp, Sv)
-    ES.add_constraints(m, es, Ev, inp, inp.time.T)
+    pst.add_constraints(m, inp, Sv)    # 抽蓄类化；建序不变
+    ech.add_constraints(m, inp)        # 电储能类化；建序不变
     HY.add_constraints(m, hyd, Hv, inp, inp.time.T)
     FR.add_constraints(m, fr, Fv, inp, inp.time.T)
     add_constraints(m, inp, Sv, units, coal, gas, nuc, bio, ps, es, hyd, fr)
