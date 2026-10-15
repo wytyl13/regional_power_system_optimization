@@ -46,8 +46,12 @@ def build(m: gp.Model, inp: reader.Inputs):
     ga = GA.Gas()                       # 气电已类化
     ga.load(inp)
     gas = ga.inputs
-    nuc = NU.load_nuclear(inp)
-    bio = BI.load_biomass(inp)
+    nu = NU.Nuclear()                   # 核电已类化
+    nu.load(inp)
+    nuc = nu.inputs
+    bi = BI.Biomass()                   # 生物质已类化
+    bi.load(inp)
+    bio = bi.inputs
     ps = PS.load_ps(inp)
     es = ES.load_es(inp)
     hyd = HY.load_hyd(inp)
@@ -55,8 +59,8 @@ def build(m: gp.Model, inp: reader.Inputs):
     
     Tv = th.add_vars(m)
     Gv = ga.add_vars(m)
-    Nv = NU.add_vars(m, nuc)
-    Bv = BI.add_vars(m, bio)
+    Nv = nu.add_vars(m)
+    Bv = bi.add_vars(m)
     Pv = PS.add_vars(m, ps)
     Ev = ES.add_vars(m, es, inp.time.T)
     Hv = HY.add_vars(m, hyd, inp.time.T)
@@ -68,17 +72,18 @@ def build(m: gp.Model, inp: reader.Inputs):
                                friendly=Fv)
     th.add_constraints(m, inp)         # 煤电类化四步之三；建序不变
     ga.add_constraints(m, inp)         # 气电类化；建序不变
-    NU.add_constraints(m, nuc, Nv)
-    BI.add_constraints(m, bio, Bv)
+    nu.add_constraints(m, inp)         # 核电类化；建序不变
+    bi.add_constraints(m, inp)         # 生物质类化；建序不变
     PS.add_constraints(m, ps, Pv, inp, Sv)
     ES.add_constraints(m, es, Ev, inp, inp.time.T)
     HY.add_constraints(m, hyd, Hv, inp, inp.time.T)
     FR.add_constraints(m, fr, Fv, inp, inp.time.T)
     CT.add_constraints(m, inp, Sv, units, coal, gas, nuc, bio, ps, es, hyd, fr)
-    return coal, gas, nuc, bio, ps, es, hyd, fr, th, ga, Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv, units
+    return coal, gas, nuc, bio, ps, es, hyd, fr, th, ga, nu, bi, Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv, units
 
 
 def add_objective(m: gp.Model, inp: reader.Inputs, th: TH.Thermal, ga: GA.Gas,
+                  nu: NU.Nuclear, bi: BI.Biomass,
                   coal: TH.CoalInputs,
                   gas: GA.GasInputs, nuc: NU.NuclearInputs, bio: BI.BiomassInputs,
                   ps: PS.PSInputs, es: ES.ESInputs, hyd: HY.HydInputs, fr: FR.FrInputs,
@@ -105,15 +110,13 @@ def add_objective(m: gp.Model, inp: reader.Inputs, th: TH.Thermal, ga: GA.Gas,
     C_gas_stop = ga_cost["C_gas_stop"]; C_gas_FOM = ga_cost["C_gas_FOM"]
     C_gas_CO2 = ga_cost["C_gas_CO2"]
 
-    # ---- 4.10 核电（1070-1073）----
-    C_nuc_gen = Delta_t * _wsum(nuc.c_nuc_gen, Nv.P_nuc, T)              # 1071
-    C_nuc_FOM = float(np.sum(nuc.c_nuc_FOM * nuc.P_nuc_max))              # 1072 常数
-    C_nuc = C_nuc_gen + C_nuc_FOM                                          # 1073
+    # ---- 4.10 核电（1070-1073）：类化后由单元 add_cost 产出 ----
+    nu_cost = nu.add_cost(Delta_t, inp.econ)
+    C_nuc = nu_cost["C_nuc"]; C_nuc_gen = nu_cost["C_nuc_gen"]; C_nuc_FOM = nu_cost["C_nuc_FOM"]
 
-    # ---- 4.3 生物质（1035-1038）----
-    C_bio_gen = Delta_t * _wsum(bio.c_bio_gen, Bv.P_bio, T)               # 1036
-    C_bio_FOM = float(np.sum(bio.c_bio_FOM * bio.P_bio_rated))            # 1037 常数，v2 基数=额定
-    C_bio = C_bio_gen + C_bio_FOM                                          # 1038
+    # ---- 4.3 生物质（1035-1038）：类化后由单元 add_cost 产出 ----
+    bi_cost = bi.add_cost(Delta_t, inp.econ)
+    C_bio = bi_cost["C_bio"]; C_bio_gen = bi_cost["C_bio_gen"]; C_bio_FOM = bi_cost["C_bio_FOM"]
 
     # ---- 4.5 电化学储能（1046-1049）----
     # 1047: Delta_t*sum(c'*(P_ch+P_dis))，拆两次 _wsum 数值等价（MLinExpr 不进 _wsum）
@@ -202,8 +205,8 @@ def add_objective(m: gp.Model, inp: reader.Inputs, th: TH.Thermal, ga: GA.Gas,
 def solve(inp: reader.Inputs):
     """组装 + 求解 + 取值；返回纯数据 SolutionData，不做前端口径组装。"""
     m = gp.Model("coal_gas_nuc_bio_sto_hyd_fr_T%d" % inp.time.T)
-    coal, gas, nuc, bio, ps, es, hyd, fr, th, ga, Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv, units = build(m, inp)
-    cost_exprs = add_objective(m, inp, th, ga, coal, gas, nuc, bio, ps, es, hyd, fr,
+    coal, gas, nuc, bio, ps, es, hyd, fr, th, ga, nu, bi, Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv, units = build(m, inp)
+    cost_exprs = add_objective(m, inp, th, ga, nu, bi, coal, gas, nuc, bio, ps, es, hyd, fr,
                                Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv)
     m.update()
 

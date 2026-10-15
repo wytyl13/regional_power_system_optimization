@@ -238,16 +238,20 @@ if __name__ == "__main__":
     ga = GA.Gas()                       # 气电已类化
     ga.load(inp)
     gas = ga.inputs
-    nuc = NU.load_nuclear(inp)
-    bio = BI.load_biomass(inp)
+    nu = NU.Nuclear()                   # 核电已类化
+    nu.load(inp)
+    nuc = nu.inputs
+    bi = BI.Biomass()                   # 生物质已类化
+    bi.load(inp)
+    bio = bi.inputs
     ps = PS.load_ps(inp)
     es = ES.load_es(inp)
     hyd = HY.load_hyd(inp)
     fr = FR.load_fr(inp)
     Tv = th.add_vars(m)
     Gv = ga.add_vars(m)
-    Nv = NU.add_vars(m, nuc)
-    Bv = BI.add_vars(m, bio)
+    Nv = nu.add_vars(m)
+    Bv = bi.add_vars(m)
     Pv = PS.add_vars(m, ps)
     Ev = ES.add_vars(m, es, inp.time.T)
     Hv = HY.add_vars(m, hyd, inp.time.T)
@@ -258,8 +262,8 @@ if __name__ == "__main__":
                             friendly=Fv)
     th.add_constraints(m, inp)         # 煤电类化；建序不变
     ga.add_constraints(m, inp)         # 气电类化；建序不变
-    NU.add_constraints(m, nuc, Nv)
-    BI.add_constraints(m, bio, Bv)
+    nu.add_constraints(m, inp)         # 核电类化；建序不变
+    bi.add_constraints(m, inp)         # 生物质类化；建序不变
     PS.add_constraints(m, ps, Pv, inp, Sv)
     ES.add_constraints(m, es, Ev, inp, inp.time.T)
     HY.add_constraints(m, hyd, Hv, inp, inp.time.T)
