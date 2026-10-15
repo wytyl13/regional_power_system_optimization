@@ -40,7 +40,9 @@ def _wsum(w: np.ndarray, X: gp.MVar, T: int):
 
 def build(m: gp.Model, inp: reader.Inputs):
     """变量 + 约束全组装（煤电 → 气 → 核/生 → 储 → 水 → 友好 → 系统层），返回句柄。"""
-    coal = TH.load_coal(inp)
+    th = TH.Thermal()                  # 煤电已类化（四步生命周期）；其余电源仍为函数模块
+    th.load(inp)
+    coal = th.inputs
     gas = GA.load_gas(inp)
     nuc = NU.load_nuclear(inp)
     bio = BI.load_biomass(inp)
@@ -49,7 +51,7 @@ def build(m: gp.Model, inp: reader.Inputs):
     hyd = HY.load_hyd(inp)
     fr = FR.load_fr(inp)
     
-    Tv = TH.add_vars(m, coal)
+    Tv = th.add_vars(m)
     Gv = GA.add_vars(m, gas)
     Nv = NU.add_vars(m, nuc)
     Bv = BI.add_vars(m, bio)
@@ -62,7 +64,7 @@ def build(m: gp.Model, inp: reader.Inputs):
     units = CT.RegisteredUnits(thermal=Tv, gas=Gv, nuclear=Nv, biomass=Bv,
                                pumped_storage=Pv, electrochemical=Ev, hydro=Hv,
                                friendly=Fv)
-    TH.add_constraints(m, coal, Tv)
+    th.add_constraints(m, inp)         # 煤电类化四步之三；建序不变
     GA.add_constraints(m, gas, Gv)
     NU.add_constraints(m, nuc, Nv)
     BI.add_constraints(m, bio, Bv)
@@ -71,10 +73,11 @@ def build(m: gp.Model, inp: reader.Inputs):
     HY.add_constraints(m, hyd, Hv, inp, inp.time.T)
     FR.add_constraints(m, fr, Fv, inp, inp.time.T)
     CT.add_constraints(m, inp, Sv, units, coal, gas, nuc, bio, ps, es, hyd, fr)
-    return coal, gas, nuc, bio, ps, es, hyd, fr, Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv, units
+    return coal, gas, nuc, bio, ps, es, hyd, fr, th, Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv, units
 
 
-def add_objective(m: gp.Model, inp: reader.Inputs, coal: TH.CoalInputs,
+def add_objective(m: gp.Model, inp: reader.Inputs, th: TH.Thermal,
+                  coal: TH.CoalInputs,
                   gas: GA.GasInputs, nuc: NU.NuclearInputs, bio: BI.BiomassInputs,
                   ps: PS.PSInputs, es: ES.ESInputs, hyd: HY.HydInputs, fr: FR.FrInputs,
                   Tv: TH.ThermalVars, Gv: GA.GasVars, Nv: NU.NuclearVars, Bv: BI.BiomassVars,
@@ -85,17 +88,13 @@ def add_objective(m: gp.Model, inp: reader.Inputs, coal: TH.CoalInputs,
     """
     T, Delta_t = inp.time.T, inp.time.Delta_t
 
-    # ---- 4.1 煤电（1016-1025）----
-    C_th_fuel  = Delta_t * Tv.F_th.sum()                              # 1017
-    C_th_start = _wsum(coal.c_th_start, Tv.v_th, T)                    # 1018
-    C_th_stop  = _wsum(coal.c_th_stop, Tv.w_th, T)                     # 1019
-    C_th_FOM   = float(np.sum(coal.c_th_FOM * coal.P_th_rated))        # 1020 常数，v2 基数=额定
-    C_th_CO2   = inp.econ.c_CO2 * Delta_t * Tv.CO2_th.sum()                # 1021
-    C_th_SO2   = inp.econ.c_SO2 * Delta_t * _wsum(coal.SO2_th_factor, Tv.P_th, T)    # 1022
-    C_th_NOX   = inp.econ.c_NOX * Delta_t * _wsum(coal.NOX_th_factor, Tv.P_th, T)    # 1023
-    C_th_dust  = inp.econ.c_dust * Delta_t * _wsum(coal.dust_th_factor, Tv.P_th, T)  # 1024
-    C_th = C_th_fuel + C_th_start + C_th_stop + C_th_FOM + \
-        C_th_CO2 + C_th_SO2 + C_th_NOX + C_th_dust                    # 1025
+    # ---- 4.1 煤电（1016-1025）：类化后由单元 add_cost 产出，键名合同不变 ----
+    th_cost = th.add_cost(Delta_t, inp.econ)
+    C_th = th_cost["C_th"]
+    C_th_fuel = th_cost["C_th_fuel"]; C_th_start = th_cost["C_th_start"]
+    C_th_stop = th_cost["C_th_stop"]; C_th_FOM = th_cost["C_th_FOM"]
+    C_th_CO2 = th_cost["C_th_CO2"]; C_th_SO2 = th_cost["C_th_SO2"]
+    C_th_NOX = th_cost["C_th_NOX"]; C_th_dust = th_cost["C_th_dust"]
 
     # ---- 4.2 气电（1027-1033）----
     C_gas_gen   = Delta_t * _wsum(gas.c_gas_gen, Gv.P_gas, T)          # 1028
@@ -202,8 +201,8 @@ def add_objective(m: gp.Model, inp: reader.Inputs, coal: TH.CoalInputs,
 def solve(inp: reader.Inputs):
     """组装 + 求解 + 取值；返回纯数据 SolutionData，不做前端口径组装。"""
     m = gp.Model("coal_gas_nuc_bio_sto_hyd_fr_T%d" % inp.time.T)
-    coal, gas, nuc, bio, ps, es, hyd, fr, Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv, units = build(m, inp)
-    cost_exprs = add_objective(m, inp, coal, gas, nuc, bio, ps, es, hyd, fr,
+    coal, gas, nuc, bio, ps, es, hyd, fr, th, Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv, units = build(m, inp)
+    cost_exprs = add_objective(m, inp, th, coal, gas, nuc, bio, ps, es, hyd, fr,
                                Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv)
     m.update()
 

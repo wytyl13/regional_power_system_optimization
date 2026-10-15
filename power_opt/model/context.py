@@ -232,7 +232,9 @@ if __name__ == "__main__":
     from model.units import friendly as FR
     inp = reader.load_inputs()
     m = gp.Model()
-    coal = TH.load_coal(inp)
+    th = TH.Thermal()                  # 煤电已类化（四步生命周期）；其余电源仍为函数模块
+    th.load(inp)
+    coal = th.inputs
     gas = GA.load_gas(inp)
     nuc = NU.load_nuclear(inp)
     bio = BI.load_biomass(inp)
@@ -240,7 +242,7 @@ if __name__ == "__main__":
     es = ES.load_es(inp)
     hyd = HY.load_hyd(inp)
     fr = FR.load_fr(inp)
-    Tv = TH.add_vars(m, coal)
+    Tv = th.add_vars(m)
     Gv = GA.add_vars(m, gas)
     Nv = NU.add_vars(m, nuc)
     Bv = BI.add_vars(m, bio)
@@ -252,7 +254,7 @@ if __name__ == "__main__":
     units = RegisteredUnits(thermal=Tv, gas=Gv, nuclear=Nv, biomass=Bv,
                             pumped_storage=Pv, electrochemical=Ev, hydro=Hv,
                             friendly=Fv)
-    TH.add_constraints(m, coal, Tv)
+    th.add_constraints(m, inp)         # 煤电类化；建序不变
     GA.add_constraints(m, gas, Gv)
     NU.add_constraints(m, nuc, Nv)
     BI.add_constraints(m, bio, Bv)
