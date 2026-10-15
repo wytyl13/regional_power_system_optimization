@@ -61,7 +61,9 @@ def build(m: gp.Model, inp: reader.Inputs):
     hy = HY.Hydro()                       # 水电已类化
     hy.load(inp)
     hyd = hy.inputs
-    fr = FR.load_fr(inp)
+    fri = FR.Friendly()                   # 友好电站已类化
+    fri.load(inp)
+    fr = fri.inputs
 
     Tv = th.add_vars(m)
     Gv = ga.add_vars(m)
@@ -70,7 +72,7 @@ def build(m: gp.Model, inp: reader.Inputs):
     Pv = pst.add_vars(m)
     Ev = ech.add_vars(m)
     Hv = hy.add_vars(m)                  # 水电类化；建序不变
-    Fv = FR.add_vars(m, fr, inp.time.T)
+    Fv = fri.add_vars(m)                 # 友好电站类化；建序不变
     Sv = CT.add_vars(m, inp)
     
     units = CT.RegisteredUnits(thermal=Tv, gas=Gv, nuclear=Nv, biomass=Bv,
@@ -83,14 +85,14 @@ def build(m: gp.Model, inp: reader.Inputs):
     pst.add_constraints(m, inp, Sv)    # 抽蓄类化；建序不变
     ech.add_constraints(m, inp)        # 电储能类化；建序不变
     hy.add_constraints(m, inp)         # 水电类化；建序不变
-    FR.add_constraints(m, fr, Fv, inp, inp.time.T)
+    fri.add_constraints(m, inp)        # 友好电站类化；建序不变
     CT.add_constraints(m, inp, Sv, units, coal, gas, nuc, bio, ps, es, hyd, fr)
-    return coal, gas, nuc, bio, ps, es, hyd, fr, th, ga, nu, bi, pst, ech, hy, Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv, units
+    return coal, gas, nuc, bio, ps, es, hyd, fr, th, ga, nu, bi, pst, ech, hy, fri, Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv, units
 
 
 def add_objective(m: gp.Model, inp: reader.Inputs, th: TH.Thermal, ga: GA.Gas,
                   nu: NU.Nuclear, bi: BI.Biomass, pst: PS.PumpedStorage,
-                  ech: ES.Electrochemical, hy: HY.Hydro,
+                  ech: ES.Electrochemical, hy: HY.Hydro, fri: FR.Friendly,
                   coal: TH.CoalInputs,
                   gas: GA.GasInputs, nuc: NU.NuclearInputs, bio: BI.BiomassInputs,
                   ps: PS.PSInputs, es: ES.ESInputs, hyd: HY.HydInputs, fr: FR.FrInputs,
@@ -137,17 +139,12 @@ def add_objective(m: gp.Model, inp: reader.Inputs, th: TH.Thermal, ga: GA.Gas,
     C_hyd = hyd_cost["C_hyd"]
     C_hyd_curt = hyd_cost["C_hyd_curt"]
 
-    # ---- 4.9 新能源友好电站（1062-1068）----
-    C_fr_degrade = Delta_t * (_wsum(fr.c_fr_degrade, Fv.P_fr_charge, T)
-                              + _wsum(fr.c_fr_degrade, Fv.P_fr_discharge, T))   # 1063
-    C_fr_FOM = float(inp.econ.fixedCostScale
-                     * (np.sum(fr.fom_wind * fr.wind_cap)
-                        + np.sum(fr.fom_pv * fr.pv_cap)
-                        + np.sum(fr.fom_power * fr.P_fr_es_max)
-                        + np.sum(fr.fom_energy * fr.E_fr_max)))     # 1064-1066 常数
-    C_fr = C_fr_degrade + C_fr_FOM                                  # 1067
-    C_fr_curt = (inp.econ.c_wind_curt * Delta_t * Fv.P_fr_wind_curt.sum()
-                 + inp.econ.c_pv_curt * Delta_t * Fv.P_fr_pv_curt.sum())  # 1068
+    # ---- 4.9 新能源友好电站（1062-1068）：类化后由单元 add_cost 产出 ----
+    fr_cost = fri.add_cost(Delta_t, inp.econ)
+    C_fr_degrade = fr_cost["C_fr_degrade"]
+    C_fr_FOM = fr_cost["C_fr_FOM"]
+    C_fr = fr_cost["C_fr"]
+    C_fr_curt = fr_cost["C_fr_curt"]
 
     # ---- 4.12 需求响应（1079-1082）----
     C_DR = Delta_t * _wsum(inp.dr.ShiftCost, Sv.P_shift_in, T) \
@@ -207,8 +204,8 @@ def add_objective(m: gp.Model, inp: reader.Inputs, th: TH.Thermal, ga: GA.Gas,
 def solve(inp: reader.Inputs):
     """组装 + 求解 + 取值；返回纯数据 SolutionData，不做前端口径组装。"""
     m = gp.Model("coal_gas_nuc_bio_sto_hyd_fr_T%d" % inp.time.T)
-    coal, gas, nuc, bio, ps, es, hyd, fr, th, ga, nu, bi, pst, ech, hy, Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv, units = build(m, inp)
-    cost_exprs = add_objective(m, inp, th, ga, nu, bi, pst, ech, hy, coal, gas, nuc, bio, ps, es, hyd, fr,
+    coal, gas, nuc, bio, ps, es, hyd, fr, th, ga, nu, bi, pst, ech, hy, fri, Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv, units = build(m, inp)
+    cost_exprs = add_objective(m, inp, th, ga, nu, bi, pst, ech, hy, fri, coal, gas, nuc, bio, ps, es, hyd, fr,
                                Tv, Gv, Nv, Bv, Pv, Ev, Hv, Fv, Sv)
     m.update()
 

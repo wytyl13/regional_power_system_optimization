@@ -253,7 +253,9 @@ if __name__ == "__main__":
     hy = HY.Hydro()                       # 水电已类化
     hy.load(inp)
     hyd = hy.inputs
-    fr = FR.load_fr(inp)
+    fri = FR.Friendly()                   # 友好电站已类化
+    fri.load(inp)
+    fr = fri.inputs
     Tv = th.add_vars(m)
     Gv = ga.add_vars(m)
     Nv = nu.add_vars(m)
@@ -261,7 +263,7 @@ if __name__ == "__main__":
     Pv = pst.add_vars(m)
     Ev = ech.add_vars(m)
     Hv = hy.add_vars(m)                  # 水电类化；建序不变
-    Fv = FR.add_vars(m, fr, inp.time.T)
+    Fv = fri.add_vars(m)                 # 友好电站类化；建序不变
     Sv = add_vars(m, inp)
     units = RegisteredUnits(thermal=Tv, gas=Gv, nuclear=Nv, biomass=Bv,
                             pumped_storage=Pv, electrochemical=Ev, hydro=Hv,
@@ -273,7 +275,7 @@ if __name__ == "__main__":
     pst.add_constraints(m, inp, Sv)    # 抽蓄类化；建序不变
     ech.add_constraints(m, inp)        # 电储能类化；建序不变
     hy.add_constraints(m, inp)          # 水电类化；建序不变
-    FR.add_constraints(m, fr, Fv, inp, inp.time.T)
+    fri.add_constraints(m, inp)         # 友好电站类化；建序不变
     add_constraints(m, inp, Sv, units, coal, gas, nuc, bio, ps, es, hyd, fr)
     m.update()
     # 各模块账本（海南 T=168，见各模块 __main__）：行/列逐模块减出系统层
