@@ -250,7 +250,9 @@ if __name__ == "__main__":
     ech = ES.Electrochemical()          # 电储能已类化
     ech.load(inp)
     es = ech.inputs
-    hyd = HY.load_hyd(inp)
+    hy = HY.Hydro()                       # 水电已类化
+    hy.load(inp)
+    hyd = hy.inputs
     fr = FR.load_fr(inp)
     Tv = th.add_vars(m)
     Gv = ga.add_vars(m)
@@ -258,7 +260,7 @@ if __name__ == "__main__":
     Bv = bi.add_vars(m)
     Pv = pst.add_vars(m)
     Ev = ech.add_vars(m)
-    Hv = HY.add_vars(m, hyd, inp.time.T)
+    Hv = hy.add_vars(m)                  # 水电类化；建序不变
     Fv = FR.add_vars(m, fr, inp.time.T)
     Sv = add_vars(m, inp)
     units = RegisteredUnits(thermal=Tv, gas=Gv, nuclear=Nv, biomass=Bv,
@@ -270,7 +272,7 @@ if __name__ == "__main__":
     bi.add_constraints(m, inp)         # 生物质类化；建序不变
     pst.add_constraints(m, inp, Sv)    # 抽蓄类化；建序不变
     ech.add_constraints(m, inp)        # 电储能类化；建序不变
-    HY.add_constraints(m, hyd, Hv, inp, inp.time.T)
+    hy.add_constraints(m, inp)          # 水电类化；建序不变
     FR.add_constraints(m, fr, Fv, inp, inp.time.T)
     add_constraints(m, inp, Sv, units, coal, gas, nuc, bio, ps, es, hyd, fr)
     m.update()
