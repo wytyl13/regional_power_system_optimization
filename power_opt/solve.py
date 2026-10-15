@@ -48,6 +48,7 @@ def build(m: gp.Model, inp: reader.Inputs):
     es = ES.load_es(inp)
     hyd = HY.load_hyd(inp)
     fr = FR.load_fr(inp)
+    
     Tv = TH.add_vars(m, coal)
     Gv = GA.add_vars(m, gas)
     Nv = NU.add_vars(m, nuc)
@@ -57,6 +58,7 @@ def build(m: gp.Model, inp: reader.Inputs):
     Hv = HY.add_vars(m, hyd, inp.time.T)
     Fv = FR.add_vars(m, fr, inp.time.T)
     Sv = CT.add_vars(m, inp)
+    
     units = CT.RegisteredUnits(thermal=Tv, gas=Gv, nuclear=Nv, biomass=Bv,
                                pumped_storage=Pv, electrochemical=Ev, hydro=Hv,
                                friendly=Fv)
@@ -210,13 +212,14 @@ def solve(inp: reader.Inputs):
         inp.time.T, config.MIGAP, datetime.now().strftime("%Y%m%d_%H%M%S")))
     run_dir.mkdir(parents=True, exist_ok=True)
     config.RESULT_DIR = run_dir
-    # 求解参数镜像 MATLAB 1164-1168
+    
+    # 设置求解参数镜像 MATLAB 1164-1168
     m.Params.MIPGap = config.MIGAP
     m.Params.TimeLimit = config.TIME_LIMIT
     m.Params.MIPFocus = config.MIP_FOCUS
     m.Params.Heuristics = config.HEURISTICS
     m.Params.DualReductions = config.DUAL_REDUCTIONS
-    m.Params.Threads = 1        # 单线程锁定多最优解（code_basic_rule 第6节规格；MATLAB 侧暂不设，保老师定稿锚点）
+    m.Params.Threads = 1        # 单线程锁定多最优解
     m.Params.Seed = 0           # 显式固定随机种子（默认即 0，防御性声明）
     m.Params.LogFile = str(config.RESULT_DIR / ("gurobi_py_T%d.log" % inp.time.T))
     m.optimize()
@@ -249,12 +252,12 @@ if __name__ == "__main__":
     if solution.four_items["objective"]["value"] is not None:
         metrics = compute_metrics(inp, solution)
         write_result_json(inp, solution, config, metrics)
-        import plot as PL                                 # 放 __main__ 里延迟导入，避免和 plot.py 顶部的 import solve 循环
-        PL.plt.rcParams["font.family"] = ["Microsoft YaHei"]   # 汉字字体，plot.main 原有设置
+        import plot as PL
+        PL.plt.rcParams["font.family"] = ["Microsoft YaHei"]
         PL.plt.rcParams["axes.unicode_minus"] = False
-        PL.plot_operation(inp, solution, save_png=True)   # 先出 00 堆叠图源
+        PL.plot_operation(inp, solution, save_png=True)
         PL.write_chart_csv(inp, solution)
-        import analysis_export as AE                      # MATLAB 十二节同位（此时 00 源图已就绪）
+        import analysis_export as AE
         AE.export_analysis(inp, solution, metrics)
     print("---- 本次配置 ----")
     print("时段数 T=%d  起始 %s  步长 %g h  水文情景 %s"

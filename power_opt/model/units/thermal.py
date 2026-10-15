@@ -22,19 +22,19 @@ from power_opt.reader import _read, _zstr, Inputs
 @dataclass
 class CoalInputs:
     """MATLAB 1.3 节工作区变量的镜像；变量名与 MATLAB 一致。"""
-    N_th: int
-    UnitKey_th: list
-    name_th: list                # 机组名（八~十一节分析表用，MATLAB thData.NAME）
-    area_th: np.ndarray            # 机组 → 分区（0 基）
-    P_th_rated: np.ndarray         # 额定容量，仅固定运维基数（MATLAB 81）
-    P_th_max: np.ndarray; P_th_min: np.ndarray
-    m_th: np.ndarray               # 检修：1 检修，0 可用（N_th×T）
-    c_th_FOM: np.ndarray           # 本周期元/MW
-    u_th_0: np.ndarray
-    c_th_start: np.ndarray; c_th_stop: np.ndarray
-    a_th: np.ndarray; b_th: np.ndarray; c_th: np.ndarray
-    T_th_up: np.ndarray; T_th_down: np.ndarray; T_th_initial: np.ndarray
-    P_th_0: np.ndarray
+    N_th: int                                   # 机组台数
+    UnitKey_th: list                            # 分区唯一编号                    
+    name_th: list                               # 机组名
+    area_th: np.ndarray                         # 机组 → 分区（0 基）
+    P_th_rated: np.ndarray                      # 额定容量，仅固定运维基数
+    P_th_max: np.ndarray; P_th_min: np.ndarray  # 非供暖期可用上限，MW / 单机最小技术出力，MW
+    m_th: np.ndarray                            # 检修：1 检修，0 可用（N_th×T）
+    c_th_FOM: np.ndarray                        # 本周期元/MW
+    u_th_0: np.ndarray                          # 周期前运行状态，0/1
+    c_th_start: np.ndarray; c_th_stop: np.ndarray # 单次启动成本，元
+    a_th: np.ndarray; b_th: np.ndarray; c_th: np.ndarray # 燃料成本二次项系数
+    T_th_up: np.ndarray; T_th_down: np.ndarray; T_th_initial: np.ndarray # 最小连续开机小时数 / 最小连续停机小时数 / 周期前已保持初始状态的小时数
+    P_th_0: np.ndarray # 周期前功率，MW
     RU_th: np.ndarray; RD_th: np.ndarray; SU_th: np.ndarray; SD_th: np.ndarray
     SO2_th_factor: np.ndarray; NOX_th_factor: np.ndarray; dust_th_factor: np.ndarray
     CO2_th_node: np.ndarray        # N_th×6，t/h
@@ -71,7 +71,6 @@ def load_coal(inp: Inputs) -> CoalInputs:
     SO2_FACTOR：SO2排放因子
     NOX_FACTOR：NOx排放因子
     DUST_FACTOR：烟尘排放因子
-    
     """
     req_th = ["UnitKey", "SUBSTR(C.ID，12)", "CAP", "DERATE_RATE", "MIN_POWER_GEN", "INIT_STATUS",
               "COST_START_UP", "COST_SHUT_DOWN", "COST_A", "COST_B", "COST_C",
