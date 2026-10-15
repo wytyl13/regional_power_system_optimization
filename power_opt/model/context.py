@@ -235,7 +235,9 @@ if __name__ == "__main__":
     th = TH.Thermal()                  # 煤电已类化（四步生命周期）；其余电源仍为函数模块
     th.load(inp)
     coal = th.inputs
-    gas = GA.load_gas(inp)
+    ga = GA.Gas()                       # 气电已类化
+    ga.load(inp)
+    gas = ga.inputs
     nuc = NU.load_nuclear(inp)
     bio = BI.load_biomass(inp)
     ps = PS.load_ps(inp)
@@ -243,7 +245,7 @@ if __name__ == "__main__":
     hyd = HY.load_hyd(inp)
     fr = FR.load_fr(inp)
     Tv = th.add_vars(m)
-    Gv = GA.add_vars(m, gas)
+    Gv = ga.add_vars(m)
     Nv = NU.add_vars(m, nuc)
     Bv = BI.add_vars(m, bio)
     Pv = PS.add_vars(m, ps)
@@ -255,7 +257,7 @@ if __name__ == "__main__":
                             pumped_storage=Pv, electrochemical=Ev, hydro=Hv,
                             friendly=Fv)
     th.add_constraints(m, inp)         # 煤电类化；建序不变
-    GA.add_constraints(m, gas, Gv)
+    ga.add_constraints(m, inp)         # 气电类化；建序不变
     NU.add_constraints(m, nuc, Nv)
     BI.add_constraints(m, bio, Bv)
     PS.add_constraints(m, ps, Pv, inp, Sv)
