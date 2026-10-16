@@ -25,10 +25,10 @@ sys.path.insert(0, str(HERE.parent / "service"))
 import numpy as np
 
 import config
-import reader_new
+import reader
+from analysis_export import AnalysisExport
 from solve import solve
-from solution import compute_metrics, write_result_json
-from assemble import build_analysis
+from solution import write_result_json
 
 
 def main():
@@ -37,16 +37,17 @@ def main():
     if config.MIGAP > 0.01:
         config.MIGAP = 0.01
     print(f"自检规模: T={config.T} MIPGap={config.MIGAP}")
-    inp = reader_new.load_inputs()
+    inp = reader.load_inputs()
     solution = solve(inp)
     obj = solution.four_items["objective"]["value"]
     if obj is None:
         print("无可行解，自检中止")
         return 1
-    metrics = compute_metrics(inp, solution)
+    ae = AnalysisExport(inp, solution)
+    metrics = ae.metrics()
 
     # 1) 成本分解恒等式（MATLAB 1312）
-    analysis = build_analysis(inp, solution)
+    analysis = ae.build_analysis()
     six_sum = sum(it["costYuan"] for it in analysis["costSummary"]["items"])
     ten_sum = sum(it["costYuan"] for it in analysis["costDetail"]["items"])
     err = analysis["costDetail"]["reconciliationErrorYuan"]
@@ -73,16 +74,15 @@ def main():
         assert it["costYuan"] >= 0, it
     print(f"利用率界与非负成本 PASS：利用率 {util[0] * 100:.2f}%")
 
-    # 落盘全链路（比对件 + 图 CSV + 分析五表序列化）
-    write_result_json(inp, solution, config, metrics)
+    # 落盘全链路（对拍件 + 图 CSV + 分析五表序列化；v2 结果.json 瘦身口径）
+    write_result_json(inp, solution, metrics)
     import plot as PL
-    PL.write_chart_csv(inp, solution)
+    PL.Plot(inp, solution).chart_csv()
     import json
     path = config.RESULT_DIR / "结果.json"
     doc = json.loads(path.read_text(encoding="utf-8"))
-    assert set(doc) >= {"meta", "report", "positionChart", "time", "labels",
-                        "series", "costs"}
-    assert len(doc["positionChart"]) == 27, "positionChart 27 列契约"
+    assert set(doc) >= {"meta", "four_items", "costs", "metrics"}
+    assert doc["four_items"]["objective"]["value"] == obj, "four_items objective 契约"
     analysis_json = json.dumps(analysis, ensure_ascii=False)   # 可序列化
     assert "thermalSummary" in analysis_json and len(
         analysis["thermalSummary"]) == 12 + 3     # 海南煤 12 + 气 3

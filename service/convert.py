@@ -30,7 +30,8 @@ COAL_COLS = ["UnitKey", "ID", "NAME", AREA_COL, "PLANT_ID", "CAP", "MIN_POWER_GE
              "INIT_STATUS", "INIT_POWER", "FOM_COST_PERIOD", "INIT_HOURS",
              "START_RAMP", "STOP_RAMP", "SO2_FACTOR", "NOX_FACTOR", "DUST_FACTOR",
              "DataStatus", "SOURCE_COMMISSION", "SOURCE_STATUS",
-             "DERATE_RATE", "SOURCE_MIN_RATIO", "SOURCE_DERATE"]
+             "DERATE_RATE", "SOURCE_MIN_RATIO", "SOURCE_DERATE",
+             "MIN_RATIO_HEATING", "MIN_RATIO_NONHEATING"]
 GAS_COLS = ["UnitKey", "ID", "NAME", AREA_COL, "PLANT_ID", "CAP", "MIN_POWER_GEN",
             "MIN_DOWN_TIME", "MIN_UP_TIME", "RAMP_LIMIT_UP", "RAMP_LIMIT_DOWN",
             "COST_A", "COST_B", "COST_C", "COST_START_UP", "COST_SHUT_DOWN",
@@ -38,7 +39,8 @@ GAS_COLS = ["UnitKey", "ID", "NAME", AREA_COL, "PLANT_ID", "CAP", "MIN_POWER_GEN
             "INIT_STATUS", "INIT_POWER", "FOM_COST_PERIOD",
             "START_RAMP", "STOP_RAMP", "CO2_FACTOR", "GEN_COST",
             "DataStatus", "INIT_HOURS", "SOURCE_COMMISSION", "SOURCE_STATUS",
-            "DERATE_RATE", "SOURCE_MIN_RATIO", "SOURCE_DERATE"]
+            "DERATE_RATE", "SOURCE_MIN_RATIO", "SOURCE_DERATE",
+            "MIN_RATIO_HEATING", "MIN_RATIO_NONHEATING"]
 NUC_COLS = ["UnitKey", "ID", "NAME", AREA_COL, "PLANT_ID", "CAP", "MIN_POWER_GEN",
             "MIN_DOWN_TIME", "MIN_UP_TIME", "RAMP_LIMIT_UP", "RAMP_LIMIT_DOWN",
             "COST_A", "COST_B", "COST_C", "COST_START_UP", "COST_SHUT_DOWN",
@@ -52,7 +54,8 @@ BIO_COLS = ["UnitKey", "ID", "NAME", AREA_COL, "PLANT_ID", "CAP", "MIN_POWER_GEN
             "INIT_POWER", "FOM_COST_PERIOD", "INIT_MAINTENANCE",
             "START_RAMP", "STOP_RAMP", "GEN_COST",
             "DataStatus", "ENERGY_LIMIT_MWH", "SOURCE_COMMISSION", "SOURCE_STATUS",
-            "DERATE_RATE", "SOURCE_MIN_RATIO", "SOURCE_DERATE"]
+            "DERATE_RATE", "SOURCE_MIN_RATIO", "SOURCE_DERATE",
+            "MIN_RATIO_HEATING", "MIN_RATIO_NONHEATING"]
 PS_COLS = ["UnitKey", "ID", "NAME", AREA_COL, "PLANT_ID", "CAP", "MIN_POWER_GEN",
            "MIN_DOWN_TIME", "MIN_UP_TIME", "RAMP_LIMIT_UP", "RAMP_LIMIT_DOWN",
            "COST_A", "COST_B", "COST_C", "COST_START_UP", "COST_SHUT_DOWN",
@@ -208,7 +211,9 @@ def convert(parsed: dict, user_config: dict | None, out_dir) -> dict:
                 "DataStatus": dataStatus, "SOURCE_COMMISSION": _iso_date(r["投产时间"]),
                 "SOURCE_STATUS": r["状态"],
                 "DERATE_RATE": r["非供暖期受阻率"],
-                "SOURCE_MIN_RATIO": r["最小技术出力率"], "SOURCE_DERATE": r["受阻率"]}
+                "SOURCE_MIN_RATIO": r["最小技术出力率"], "SOURCE_DERATE": r["受阻率"],
+                "MIN_RATIO_HEATING": r["供暖期最小技术出力率"],
+                "MIN_RATIO_NONHEATING": r["非供暖期最小技术出力率"]}
 
     coal_rows, coal_keys = unit_rows(parsed["coal"], "TH", "煤电", _name_with_no, build_coal)
     coal_df = pd.DataFrame(coal_rows, columns=COAL_COLS)
@@ -246,7 +251,9 @@ def convert(parsed: dict, user_config: dict | None, out_dir) -> dict:
                 "DataStatus": dataStatus, "INIT_HOURS": g["initialHours"],
                 "SOURCE_COMMISSION": _iso_date(r["投产时间"]), "SOURCE_STATUS": r["状态"],
                 "DERATE_RATE": r["非供暖期受阻率"],
-                "SOURCE_MIN_RATIO": r["最小技术出力率"], "SOURCE_DERATE": r["受阻率"]}
+                "SOURCE_MIN_RATIO": r["最小技术出力率"], "SOURCE_DERATE": r["受阻率"],
+                "MIN_RATIO_HEATING": r["供暖期最小技术出力率"],
+                "MIN_RATIO_NONHEATING": r["非供暖期最小技术出力率"]}
 
     gas_rows, gas_keys = unit_rows(parsed["gas"], "GAS", "气电", _name_with_no, build_gas)
 
@@ -289,7 +296,9 @@ def convert(parsed: dict, user_config: dict | None, out_dir) -> dict:
                 "ENERGY_LIMIT_MWH": cap * (1 - derate) * b["annualHours"],
                 "SOURCE_COMMISSION": _iso_date(r["投产时间"]), "SOURCE_STATUS": r["状态"],
                 "DERATE_RATE": derate,
-                "SOURCE_MIN_RATIO": r["最小技术出力率"], "SOURCE_DERATE": r["受阻率"]}
+                "SOURCE_MIN_RATIO": r["最小技术出力率"], "SOURCE_DERATE": r["受阻率"],
+                "MIN_RATIO_HEATING": r["供暖期最小技术出力率"],
+                "MIN_RATIO_NONHEATING": r["非供暖期最小技术出力率"]}
 
     bio_rows, bio_keys = unit_rows(parsed["biomass"], "BIO", "生物质", _name_with_no, build_bio)
 
@@ -549,6 +558,11 @@ def convert(parsed: dict, user_config: dict | None, out_dir) -> dict:
         "光热": empty(CSP_COLS),
         "风电": wind_df, "光伏": pv_df,
         "检修计划": pd.DataFrame(mtn, columns=MTN_COLS),
+        # 供暖期设置：老师指定海南 11月15日~次年3月15日（起止含），Enabled=1（2026-10-14 MATLAB）
+        "供暖期设置": pd.DataFrame(
+            [{"ZoneID": 1, "Enabled": 1, "StartMonth": 11, "StartDay": 15,
+              "EndMonth": 3, "EndDay": 15, "说明": "按用户指定：每年11月15日至次年3月15日为供暖期，起止日均包含"}],
+            columns=["ZoneID", "Enabled", "StartMonth", "StartDay", "EndMonth", "EndDay", "说明"]),
     }
     with pd.ExcelWriter(out_dir / "分区机组信息表.xlsx") as w:
         for sheet, df in unit_dfs.items():

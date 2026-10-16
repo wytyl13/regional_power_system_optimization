@@ -37,11 +37,11 @@ from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from assemble import (RunConfig, build_analysis, po_build_views,
-                      po_last_result_dir, po_run)
+from assemble import RunConfig, po_AnalysisExport, po_run
 from convert import _included, _pick, convert
 from defaults import FIXED_PARAMS, build_form, merge_config
 from parse_template import parse_template
+from position_chart import build_position_chart, build_report
 from shared.errors import (ConflictError, NotFoundError, ValidationError,
                            install_handlers)
 from tree import build_categories, read_curve
@@ -337,22 +337,29 @@ def _run_job(job_id: str):
         use_interprovincial=bool(sc["interprovincial"]),
         use_fixed_transfer=bool(sc["interRegionTransfer"]),
     )
-    solution, inp, metrics = po_run(run_cfg)
+    solution, inp = po_run(run_cfg)
     four = solution.four_items
     job["fourItems"] = four
     if four["objective"]["value"] is None:
         raise RuntimeError(f"求解无可行解（{four['status']}），"
-                           f"日志: 见 {job_dir} 下 gurobi_py_T{inp.T}.log")
-    # 结果.json 已由 po_run 落盘；solve 会把 RESULT_DIR 指到时间戳子目录，
-    # 用显式取回函数拿真实落盘位置（不摸 config 全局态）
-    result = json.loads((po_last_result_dir() / "结果.json").read_text(encoding="utf-8"))
+                           f"日志: 见 {job_dir} 下 gurobi_py_T{inp.time.T}.log")
+    # v2：前端件在 service 侧组装（结果.json 已瘦身为算法对拍件，不再回读）。
+    # report/positionChart 是前端独有口径；views 其余 tab 与五表由算法侧 AnalysisExport 出
+    ae = po_AnalysisExport(inp, solution)
+    metrics = ae.metrics()
+    result = {
+        "report": build_report(inp, solution, metrics, sc["hydrology"]),
+        "time": [t.strftime("%Y-%m-%d %H:%M:%S") for t in inp.time.Time],
+        "costs": solution.costs,          # 成本分项（六表取值用）
+    }
     job["report"] = result["report"]
-    result["analysis"] = build_analysis(inp, solution)
+    result["analysis"] = ae.build_analysis()
     # config：与 /api/datasets 下发的 config 同格式（build_form 表单结构），值为本次生效配置
     result["config"] = build_form(cfg, sorted({k[1] for k in ds["parsed"]["hydroCurves"]}))
-    # views：前端唯一渲染入口（9 tab：{title,note?,panels[]}，panel type 4 种）。
-    # 只进内存 solution.json，结果.json 落盘件不动 → T24 对拍件不破坏
-    result["views"] = po_build_views(inp, solution)
+    # views：前端唯一渲染入口（{title,note?,panels[]}，panel type 4 种）。
+    # positionChart 前端独有 → service 侧注入；其余 8 tab 算法侧组装透传
+    result["views"] = ae.build_views()
+    result["views"]["positionChart"] = build_position_chart(inp, solution)
     solution = {"jobId": job_id, "datasetId": job["datasetId"],
                 "area": ds["area"], "year": ds["year"],
                 "submittedAt": job["submittedAt"], "finishedAt": _now(),
