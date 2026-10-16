@@ -32,7 +32,7 @@ class GasInputs:
     name_gas: list                               # 机组名（八~十一节分析表用，MATLAB gasData.NAME）
     area_gas: np.ndarray                         # 机组 → 分区（0 基）
     P_gas_rated: np.ndarray                      # 额定容量，仅固定运维基数（MATLAB 137）
-    P_gas_max: np.ndarray; P_gas_min: np.ndarray  # 非供暖期可用上限，MW / 单机最小技术出力，MW
+    P_gas_max: np.ndarray; P_gas_min: np.ndarray  # 非供暖期可用上限，MW / 最小出力 N_gas×T（供暖日历切换），MW
     m_gas: np.ndarray                            # 检修：1 检修，0 可用（N_gas×T）
     c_gas_FOM: np.ndarray                        # 本周期元/MW
     u_gas_0: np.ndarray                          # 周期前运行状态，0/1
@@ -82,7 +82,28 @@ class Gas:
         mtn_gas = inp.maintenance[inp.maintenance["Type"].astype(str) == "气电"]
 
         # ---- 1.4 气电表（MATLAB 138-160）----
-        req_gas = ["UnitKey", "SUBSTR(C.ID，12)", "CAP", "DERATE_RATE", "MIN_POWER_GEN", "INIT_STATUS",
+        """
+        CAP：额定容量
+        DERATE_RATE：非供暖受阻率
+        MIN_RATIO_HEATING：供暖期最小技术出力率（×额定CAP得MW）
+        MIN_RATIO_NONHEATING：非供暖期最小技术出力率（×额定CAP得MW）
+        INIT_STATUS：周期前运行状态，0/1
+        COST_START_UP：启动成本，元/次
+        COST_SHUT_DOWN：停机成本，元/次
+        GEN_COST：单位发电成本，元/MWh
+        INIT_POWER：周期前功率（初始出力）
+        RAMP_LIMIT_UP：向上爬坡（允许的功率上升速率）
+        RAMP_LIMIT_DOWN：向下爬坡（允许的功率下降速率）
+        START_RAMP：启动允许功率变化
+        STOP_RAMP：停机允许功率变化
+        CO2_FACTOR：CO2排放因子，t/MWh
+        MIN_UP_TIME：最小连续开机时间
+        MIN_DOWN_TIME：最小连续停机时间
+        INIT_HOURS：初始状态已持续时长
+        FOM_COST_PERIOD：年度功率运维成本
+        """
+        req_gas = ["UnitKey", "SUBSTR(C.ID，12)", "CAP", "DERATE_RATE",
+                   "MIN_RATIO_HEATING", "MIN_RATIO_NONHEATING", "INIT_STATUS",
                    "COST_START_UP", "COST_SHUT_DOWN", "GEN_COST", "INIT_POWER",
                    "RAMP_LIMIT_UP", "RAMP_LIMIT_DOWN", "START_RAMP", "STOP_RAMP",
                    "CO2_FACTOR", "MIN_UP_TIME", "MIN_DOWN_TIME", "INIT_HOURS",
@@ -99,7 +120,15 @@ class Gas:
         name_gas = gasData["NAME"].astype(str).tolist()               # 八~十一节分析表用
         # MATLAB 137-138：额定容量只作固定运维基数；出力上限=额定×(1-受阻率)
         P_gas_rated = f("CAP")
-        P_gas_max = P_gas_rated * (1.0 - f("DERATE_RATE")); P_gas_min = f("MIN_POWER_GEN")
+        P_gas_max = P_gas_rated * (1.0 - f("DERATE_RATE"))
+        # MATLAB 170-174：两期出力率均以额定容量 CAP 为基准，按供暖日历逐时切换
+        zonePos = {z: i for i, z in enumerate(inp.heating.ZoneID)}
+        if miss := [z for z in zone_gas if z not in zonePos]:
+            raise KeyError(f"气电分区编号 {set(miss)} 不在供暖期设置表中")
+        P_gas_min_heating = P_gas_rated * f("MIN_RATIO_HEATING")
+        P_gas_min_nonheating = P_gas_rated * f("MIN_RATIO_NONHEATING")
+        heat = inp.heating.isHeatingPeriod[[zonePos[z] for z in zone_gas], :]   # ismember 行序
+        P_gas_min = P_gas_min_nonheating[:, None] + (P_gas_min_heating - P_gas_min_nonheating)[:, None] * heat  # 机组×T，MW
         u_gas_0 = f("INIT_STATUS")
         c_gas_start = inp.econ.costScale * f("COST_START_UP"); c_gas_stop = inp.econ.costScale * f("COST_SHUT_DOWN")
         c_gas_gen = inp.econ.costScale * f("GEN_COST")
@@ -153,14 +182,14 @@ class Gas:
         """
         gas = self.inputs
         N, T = gas.N_gas, gas.m_gas.shape[1]
-        P_gas       = m.addMVar((N, T),     lb=-INF, name="P_gas")              # MATLAB 592
-        u_gas       = m.addMVar((N, T),     vtype=gp.GRB.BINARY, name="u_gas")  # 593
-        v_gas       = m.addMVar((N, T),     vtype=gp.GRB.BINARY, name="v_gas")  # 594
-        w_gas       = m.addMVar((N, T),     vtype=gp.GRB.BINARY, name="w_gas")  # 595
-        V_gas_count = m.addMVar((N, T + 1), lb=-INF, name="V_gas_count")        # 597
-        W_gas_count = m.addMVar((N, T + 1), lb=-INF, name="W_gas_count")        # 598
-        R_gas_hot   = m.addMVar((N, T),     lb=-INF, name="R_gas_hot")          # 599
-        R_gas_cold  = m.addMVar((N, T),     lb=-INF, name="R_gas_cold")         # 600
+        P_gas       = m.addMVar((N, T),     lb=-INF, name="P_gas")
+        u_gas       = m.addMVar((N, T),     vtype=gp.GRB.BINARY, name="u_gas")
+        v_gas       = m.addMVar((N, T),     vtype=gp.GRB.BINARY, name="v_gas")
+        w_gas       = m.addMVar((N, T),     vtype=gp.GRB.BINARY, name="w_gas")
+        V_gas_count = m.addMVar((N, T + 1), lb=-INF, name="V_gas_count")
+        W_gas_count = m.addMVar((N, T + 1), lb=-INF, name="W_gas_count")
+        R_gas_hot   = m.addMVar((N, T),     lb=-INF, name="R_gas_hot")
+        R_gas_cold  = m.addMVar((N, T),     lb=-INF, name="R_gas_cold")
         self.vars = GasVars(P_gas=P_gas, u_gas=u_gas, v_gas=v_gas, w_gas=w_gas,
                             V_gas_count=V_gas_count, W_gas_count=W_gas_count,
                             R_gas_hot=R_gas_hot, R_gas_cold=R_gas_cold)
@@ -188,50 +217,47 @@ class Gas:
         P, R_hot, R_cold = var.P_gas, var.R_gas_hot, var.R_gas_cold
 
         # ---- MATLAB 743-744：u - u_prev = v - w；首列 prev = u_gas_0 ----
-        m.addConstr(u[:, 0] - gas.u_gas_0 == v[:, 0] - w[:, 0], name="logic_t0")
+        m.addConstr(u[:, 0] - gas.u_gas_0 == v[:, 0] - w[:, 0], name="logic_t0") # Math: u_{i,1} - u_{i,0} = v_{i,1} - w_{i,1}（首时段启停逻辑约束）
         if T > 1:
-            m.addConstr(u[:, 1:] - u[:, :-1] == v[:, 1:] - w[:, 1:], name="logic")
+            m.addConstr(u[:, 1:] - u[:, :-1] == v[:, 1:] - w[:, 1:], name="logic") # Math: u_{i,t} - u_{i,t-1} = v_{i,t} - w_{i,t}（常规时段启停逻辑约束）
 
-        # ---- MATLAB 745：v + w <= 1；u <= 1 - m ----
-        m.addConstr(v + w <= 1, name="vw")                                # 745
-        m.addConstr(u <= 1 - dt, name="um")                               # 745
+        m.addConstr(v + w <= 1, name="vw") # Math: v_{i,t} + w_{i,t} \le 1（同一时段不能同时启动和停机互斥约束）
+        m.addConstr(u <= 1 - dt, name="um") # Math: u_{i,t} \le 1 - m_{i,t}（计划检修状态必须停机约束）
 
-        # ---- MATLAB 746：P_min·u <= P ----
-        PminU = _col_repmat(gas, gas.P_gas_min, T)
-        m.addConstr(PminU * u <= P, name="Pmin")                          # 746
+        # ---- MATLAB 746：P_min·u <= P（P_min 已是 N×T 时变矩阵）----
+        PminU = gas.P_gas_min
+        m.addConstr(PminU * u <= P, name="Pmin") # Math: P_{gas,i}^{min} u_{i,t} \le P_{gas,i,t}（最小技术出力下限约束，P_min 逐时供暖切换）
 
         # ---- MATLAB 748：P + R_hot <= Pmax·u ----
         PmaxU = _col_repmat(gas, gas.P_gas_max, T)
-        m.addConstr(P + R_hot <= PmaxU * u, name="Pmax_hot")              # 748
+        m.addConstr(P + R_hot <= PmaxU * u, name="Pmax_hot") # Math: P_{gas,i,t} + R_{gas,i,t}^{hot} \le P_{gas,i}^{max} u_{i,t}（最大技术出力与热备用容量上限约束）
 
-        # ---- MATLAB 749：R_hot >= 0；R_cold >= 0 ----
-        m.addConstr(R_hot >= 0, name="Rhotlb")                            # 749
-        m.addConstr(R_cold >= 0, name="Rcoldlb")                          # 749
+        m.addConstr(R_hot >= 0, name="Rhotlb") # Math: R_{gas,i,t}^{hot} \ge 0（热备用容量非负约束）
+        m.addConstr(R_cold >= 0, name="Rcoldlb") # Math: R_{gas,i,t}^{cold} \ge 0（冷备用容量非负约束）
 
-        # ---- MATLAB 750/751：R_cold <= Pmax(1-u)；R_cold <= Pmax(1-m) ----
-        m.addConstr(R_cold <= PmaxU * (1 - u), name="Rcold_u")            # 750
-        m.addConstr(R_cold <= PmaxU * (1 - dt), name="Rcold_m")           # 751
+        m.addConstr(R_cold <= PmaxU * (1 - u), name="Rcold_u") # Math: R_{gas,i,t}^{cold} \le P_{gas,i}^{max} (1 - u_{i,t})（在线机组不能提供冷备用约束）
+        m.addConstr(R_cold <= PmaxU * (1 - dt), name="Rcold_m") # Math: R_{gas,i,t}^{cold} \le P_{gas,i}^{max} (1 - m_{i,t})（检修机组不能提供冷备用约束）
 
         # ---- MATLAB 752-756：爬坡。首时段 prev = P_gas_0 / u_gas_0，不经过 concatenate ----
         RU = _col_repmat(gas, gas.RU_gas, T); SU = _col_repmat(gas, gas.SU_gas, T)
         RD = _col_repmat(gas, gas.RD_gas, T); SD = _col_repmat(gas, gas.SD_gas, T)
         u0 = gas.u_gas_0[:, None]; P0 = gas.P_gas_0[:, None]     # N×1 初始状态/功率
         m.addConstr(P[:, 0:1] - P0 <= RU[:, 0:1] * u0 + SU[:, 0:1] * (u[:, 0:1] - u0),
-                    name="ramp_up_t0")                            # 753-754 首时段
+                    name="ramp_up_t0") # Math: P_{gas,i,1} - P_{gas,i,0} \le R_{gas,i}^{U} u_{i,0} + S_{gas,i}^{U} (u_{i,1} - u_{i,0})（首时段向上爬坡约束）
         m.addConstr(P0 - P[:, 0:1] <= RD[:, 0:1] * u[:, 0:1] + SD[:, 0:1] * (u0 - u[:, 0:1]),
-                    name="ramp_dn_t0")                            # 755-756 首时段
+                    name="ramp_dn_t0") # Math: P_{gas,i,0} - P_{gas,i,1} \le R_{gas,i}^{D} u_{i,1} + S_{gas,i}^{D} (u_{i,0} - u_{i,1})（首时段向下爬坡约束）
         if T > 1:
             u_prev = u[:, :-1]; P_prev = P[:, :-1]
             m.addConstr(P[:, 1:] - P_prev <= RU[:, 1:] * u_prev
-                        + SU[:, 1:] * (u[:, 1:] - u_prev), name="ramp_up")   # 其余时段
+                        + SU[:, 1:] * (u[:, 1:] - u_prev), name="ramp_up") # Math: P_{gas,i,t} - P_{gas,i,t-1} \le R_{gas,i}^{U} u_{i,t-1} + S_{gas,i}^{U} (u_{i,t} - u_{i,t-1})（常规时段向上爬坡约束）
             m.addConstr(P_prev - P[:, 1:] <= RD[:, 1:] * u[:, 1:]
-                        + SD[:, 1:] * (u_prev - u[:, 1:]), name="ramp_dn")
+                        + SD[:, 1:] * (u_prev - u[:, 1:]), name="ramp_dn") # Math: P_{gas,i,t-1} - P_{gas,i,t} \le R_{gas,i}^{D} u_{i,t} + S_{gas,i}^{D} (u_{i,t-1} - u_{i,t})（常规时段向下爬坡约束）
 
         # ---- MATLAB 759-761：累计启停量递推 ----
         Vc, Wc = var.V_gas_count, var.W_gas_count
-        m.addConstr(Vc[:, 0] == 0, name="Vinit"); m.addConstr(Wc[:, 0] == 0, name="Winit")  # 759
-        m.addConstr(Vc[:, 1:] - Vc[:, :-1] == v, name="Vrec")             # 760
-        m.addConstr(Wc[:, 1:] - Wc[:, :-1] == w, name="Wrec")             # 761
+        m.addConstr(Vc[:, 0] == 0, name="Vinit"); m.addConstr(Wc[:, 0] == 0, name="Winit") # Math: V_{i,0} = 0, \ W_{i,0} = 0（周期起点累计启停次数清零约束）
+        m.addConstr(Vc[:, 1:] - Vc[:, :-1] == v, name="Vrec") # Math: V_{i,t} - V_{i,t-1} = v_{i,t}（累计启动次数递推约束）
+        m.addConstr(Wc[:, 1:] - Wc[:, :-1] == w, name="Wrec") # Math: W_{i,t} - W_{i,t-1} = w_{i,t}（累计停机次数递推约束）
 
         # ---- MATLAB 762-778：最小开停机。初始剩余义务 remaining 全为 0（已核数据），锁定行不触发 ----
         # remaining = clip(u0*T_up + (1-u0)*T_down - init_hours, 0, None)，>0 才建锁定行，镜像 MATLAB if 守卫。
@@ -240,13 +266,13 @@ class Gas:
         for i in range(N):
             if rem[i] > 0:
                 m.addConstr(u[i, :min(T, int(rem[i]))] == gas.u_gas_0[i],
-                            name=f"lock_{i}")                             # 765
+                            name=f"lock_{i}") # Math: u_{i,t} = u_{i,0} \quad \forall t \le L_{i}（初始历史状态剩余时段锁定约束）
 
         # T_up/T_down 全>0（96/168 共 100 台、8/8 共 24 台，已核数据），MATLAB if 守卫全触发，整块直建。
         firstU = np.maximum(0, np.arange(T) - gas.T_gas_up.astype(int)[:, None] + 1)   # MATLAB 771
         firstD = np.maximum(0, np.arange(T) - gas.T_gas_down.astype(int)[:, None] + 1) # MATLAB 775
-        m.addConstr(Vc[:, 1:] - Vc[np.arange(N)[:, None], firstU] <= u, name="minup")   # 772
-        m.addConstr(Wc[:, 1:] - Wc[np.arange(N)[:, None], firstD] <= 1 - u, name="mindn")  # 776
+        m.addConstr(Vc[:, 1:] - Vc[np.arange(N)[:, None], firstU] <= u, name="minup") # Math: \sum_{\tau=t-T_{up}+1}^{t} v_{i,\tau} \le u_{i,t}（最小连续开机时间约束）
+        m.addConstr(Wc[:, 1:] - Wc[np.arange(N)[:, None], firstD] <= 1 - u, name="mindn") # Math: \sum_{\tau=t-T_{dn}+1}^{t} w_{i,\tau} \le 1 - u_{i,t}（最小连续停机时间约束）
 
     def add_cost(self, dt: float, econ) -> dict:
         """镜像 MATLAB 4.2 节（1027-1033）汇总气电成本表达式。
@@ -262,12 +288,12 @@ class Gas:
         """
         T = self.inputs.m_gas.shape[1]
         var, gas = self.vars, self.inputs
-        C_gas_gen   = dt * _wsum(gas.c_gas_gen, var.P_gas, T)            # 1028
-        C_gas_start = _wsum(gas.c_gas_start, var.v_gas, T)                # 1029
-        C_gas_stop  = _wsum(gas.c_gas_stop, var.w_gas, T)                 # 1030
-        C_gas_FOM   = float(np.sum(gas.c_gas_FOM * gas.P_gas_rated))      # 1031 常数，v2 基数=额定
-        C_gas_CO2   = econ.c_CO2 * dt * _wsum(gas.CO2_gas_factor, var.P_gas, T)  # 991+1032
-        C_gas = C_gas_gen + C_gas_start + C_gas_stop + C_gas_FOM + C_gas_CO2    # 1033（无 SO2/NOX/烟尘）
+        C_gas_gen   = dt * _wsum(gas.c_gas_gen, var.P_gas, T) # Math: C_{gas,gen} = \Delta t \sum_{t=1}^{T} \sum_{i} c_{gas,i}^{gen} P_{gas,i,t}（气电机组总发电成本）
+        C_gas_start = _wsum(gas.c_gas_start, var.v_gas, T) # Math: C_{gas,start} = \sum_{t=1}^{T} \sum_{i} c_{gas,i}^{start} v_{gas,i,t}（气电机组总启动成本）
+        C_gas_stop  = _wsum(gas.c_gas_stop, var.w_gas, T) # Math: C_{gas,stop} = \sum_{t=1}^{T} \sum_{i} c_{gas,i}^{stop} w_{gas,i,t}（气电机组总停机成本）
+        C_gas_FOM   = float(np.sum(gas.c_gas_FOM * gas.P_gas_rated)) # Math: C_{gas,FOM} = \sum_{i} c_{gas,i}^{FOM} P_{gas,i}^{rated}（气电机组固定运行维护成本）
+        C_gas_CO2   = econ.c_CO2 * dt * _wsum(gas.CO2_gas_factor, var.P_gas, T) # Math: C_{gas,CO2} = c_{CO2} \Delta t \sum_{t=1}^{T} \sum_{i} e_{gas,i}^{CO2} P_{gas,i,t}（气电机组碳排放成本）
+        C_gas = C_gas_gen + C_gas_start + C_gas_stop + C_gas_FOM + C_gas_CO2 # Math: C_{gas} = C_{gas,gen} + C_{gas,start} + C_{gas,stop} + C_{gas,FOM} + C_{gas,CO2}（气电机组总运行成本）
         return {
             "C_gas": C_gas, "C_gas_gen": C_gas_gen, "C_gas_start": C_gas_start,
             "C_gas_stop": C_gas_stop, "C_gas_FOM": C_gas_FOM, "C_gas_CO2": C_gas_CO2,
@@ -282,7 +308,7 @@ if __name__ == "__main__":
     ga.load(inp)
     gas = ga.inputs
     print('输入自检: N_gas=%d, m_gas sum=%s, FOM常数=%.2f'
-          % (gas.N_gas, gas.m_gas.sum(), float(np.sum(gas.c_gas_FOM * gas.P_gas_rated))))  # MATLAB 1031 基数=额定
+          % (gas.N_gas, gas.m_gas.sum(), float(np.sum(gas.c_gas_FOM * gas.P_gas_rated))))
 
     m = gp.Model()
     ga.add_vars(m)

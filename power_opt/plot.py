@@ -42,7 +42,8 @@ DEVICE_COLORS = np.array([
 
 def build_device_data(inp, solution):
     """MATLAB 1188-1196 plotDeviceData：21 列设备×分区×小时，发电正/充电抽水负。
-    光热/省间互济/既定跨区：未建模或开关关闭 → 0 列（债，待对应模块接入）。"""
+    光热 2026-10-16 接入（A_csp@P_csp_unit；N_csp=0 → 0 列）；
+    省间互济/既定跨区：开关关闭 → 0 列（债，待开关打开）。"""
     Z = lambda *shape: np.zeros(shape)                      # 未建模电源列 = 0
     def A(n, area):                                         # 分区归属矩阵 (Narea,n)，同 solve 残差自检
         M = Z(inp.areas.Narea, n); M[area, np.arange(n)] = 1
@@ -60,7 +61,9 @@ def build_device_data(inp, solution):
         A(count("hydro_ror"), area("hydro_ror")) @ V["P_hyd_ror"],  # 径流式水电
         A(count("hydro_reservoir"), area("hydro_reservoir")) @ V["P_hyd_res"],  # 库容式水电
         A(count("nuclear"), area("nuclear")) @ V["P_nuc"],    # 核电
-        V["P_wind"], V["P_pv"], Z(inp.areas.Narea, inp.time.T),         # 风电/光伏/光热(未建模)
+        V["P_wind"], V["P_pv"],
+        A(count("csp"), area("csp")) @ V["P_csp_unit"] if count("csp")
+        else Z(inp.areas.Narea, inp.time.T),                    # 风电/光伏/光热（MATLAB 1193）
         A(count("friendly"), area("friendly")) @ (V["P_fr_wind_out"]
                                                   + V["P_fr_wind_ch"]),
         A(count("friendly"), area("friendly")) @ (V["P_fr_pv_out"]
@@ -185,6 +188,23 @@ def plot_operation(inp, solution, save_png=False):
             fig.savefig(out, dpi=300, bbox_inches="tight")
             print("已导出:", out)
         plt.close(fig)
+
+
+class Plot:
+    """§七设备运行图入口（v2 类化）：只读 Solution，包装出图与曲线 CSV。
+    模块级 build_device_data/_scopes 保留公用（analysis_export 的 views 设备 tab 同口径）。"""
+
+    def __init__(self, inp, solution):
+        self.inp = inp
+        self.solution = solution
+
+    def operation_png(self, save_png: bool = True):
+        """全系统（+多省/多分区）设备运行堆叠图（MATLAB 1217-1299）。"""
+        return plot_operation(self.inp, self.solution, save_png=save_png)
+
+    def chart_csv(self, path=None):
+        """绘图曲线 CSV（前端复现 设备运行_*.png 用）：Time + 21 设备列 + 2 条负荷线。"""
+        return write_chart_csv(self.inp, self.solution, path)
 
 
 def main(T: int = 24, save_png: bool = False):

@@ -29,7 +29,7 @@ class CoalInputs:
     name_th: list                               # 机组名
     area_th: np.ndarray                         # 机组 → 分区（0 基）
     P_th_rated: np.ndarray                      # 额定容量，仅固定运维基数
-    P_th_max: np.ndarray; P_th_min: np.ndarray  # 非供暖期可用上限，MW / 单机最小技术出力，MW
+    P_th_max: np.ndarray; P_th_min: np.ndarray  # 非供暖期可用上限，MW / 最小出力 N_th×T（供暖日历切换），MW
     m_th: np.ndarray                            # 检修：1 检修，0 可用（N_th×T）
     c_th_FOM: np.ndarray                        # 本周期元/MW
     u_th_0: np.ndarray                          # 周期前运行状态，0/1
@@ -82,6 +82,27 @@ def _col_repmat(coal: CoalInputs, col: np.ndarray, T: int) -> np.ndarray:
     return np.repeat(col[:, None], T, axis=1)
 
 
+def _interp_extrap(x: np.ndarray, y: np.ndarray, xq: np.ndarray) -> np.ndarray:
+    """线性插值并在两端按首/末段斜率线性外推（MATLAB interp1 'linear','extrap' 等价）。
+
+    Args:
+        x (np.ndarray): 原节点横坐标 (6,)，严格递增。
+        y (np.ndarray): 原节点纵坐标 (6,)。
+        xq (np.ndarray): 查询横坐标 (6,)。
+
+    Returns:
+        np.ndarray: 插值/外推结果 (6,)。
+    """
+    yq = np.interp(xq, x, y)
+    low = xq < x[0]
+    if low.any():
+        yq[low] = y[0] + (y[1] - y[0]) / (x[1] - x[0]) * (xq[low] - x[0])
+    high = xq > x[-1]
+    if high.any():
+        yq[high] = y[-1] + (y[-1] - y[-2]) / (x[-1] - x[-2]) * (xq[high] - x[-1])
+    return yq
+
+
 class Thermal:
     """煤电单元：inputs/vars 为实例属性，四步生命周期依次组装进模型。"""
 
@@ -106,7 +127,9 @@ class Thermal:
         """
         CAP：容量
         DERATE_RATE：非供暖受阻率
-        MIN_POWER_GEN：最小技术出力
+        MIN_POWER_GEN：历史最小技术出力（仅碳排旧节点坐标用，不再作约束下限）
+        MIN_RATIO_HEATING：供暖期最小技术出力率（×额定CAP得MW）
+        MIN_RATIO_NONHEATING：非供暖期最小技术出力率（×额定CAP得MW）
         INIT_STATUS：周期前运行状态
         COST_START_UP：启动成本
         COST_SHUT_DOWN：停机成本
@@ -126,7 +149,8 @@ class Thermal:
         NOX_FACTOR：NOx排放因子
         DUST_FACTOR：烟尘排放因子
         """
-        req_th = ["UnitKey", "SUBSTR(C.ID，12)", "CAP", "DERATE_RATE", "MIN_POWER_GEN", "INIT_STATUS",
+        req_th = ["UnitKey", "SUBSTR(C.ID，12)", "CAP", "DERATE_RATE", "MIN_POWER_GEN",
+                  "MIN_RATIO_HEATING", "MIN_RATIO_NONHEATING", "INIT_STATUS",
                   "COST_START_UP", "COST_SHUT_DOWN", "COST_A", "COST_B", "COST_C",
                   "MIN_UP_TIME", "MIN_DOWN_TIME", "INIT_HOURS", "INIT_POWER",
                   "RAMP_LIMIT_UP", "RAMP_LIMIT_DOWN", "START_RAMP", "STOP_RAMP",
@@ -144,7 +168,15 @@ class Thermal:
 
         # MATLAB 81-82：额定容量只作固定运维基数；出力上限=额定×(1-受阻率)
         P_th_rated = f("CAP")
-        P_th_max = P_th_rated * (1.0 - f("DERATE_RATE")); P_th_min = f("MIN_POWER_GEN")
+        P_th_max = P_th_rated * (1.0 - f("DERATE_RATE")); P_th_min_plain = f("MIN_POWER_GEN")
+        # MATLAB 103-108：两期出力率均以额定容量 CAP 为基准，按供暖日历逐时切换
+        zonePos = {z: i for i, z in enumerate(inp.heating.ZoneID)}
+        if miss := [z for z in zone_th if z not in zonePos]:
+            raise KeyError(f"煤电分区编号 {set(miss)} 不在供暖期设置表中")
+        P_th_min_heating = P_th_rated * f("MIN_RATIO_HEATING")
+        P_th_min_nonheating = P_th_rated * f("MIN_RATIO_NONHEATING")
+        heat = inp.heating.isHeatingPeriod[[zonePos[z] for z in zone_th], :]   # ismember 行序
+        P_th_min = P_th_min_nonheating[:, None] + (P_th_min_heating - P_th_min_nonheating)[:, None] * heat  # 机组×T，MW
         u_th_0 = f("INIT_STATUS")
         c_th_start = inp.econ.costScale * f("COST_START_UP"); c_th_stop = inp.econ.costScale * f("COST_SHUT_DOWN")
         a_th = inp.econ.costScale * f("COST_A"); b_th = inp.econ.costScale * f("COST_B"); c_th = inp.econ.costScale * f("COST_C")
@@ -170,7 +202,15 @@ class Thermal:
                 P_th_0[i] = 0.0
                 T_th_initial[i] = (inp.time.Time[0] - plan["StartTime"]).total_seconds() / 3600.0
 
-        # ---- 六节点排放（MATLAB 125-135）：每台 6 行，NodeIndex 必须是 0..5 ----
+        # ---- 六节点燃料成本派生（MATLAB 118-121）：曲线覆盖两期可行出力范围，
+        # 下限取两期出力率最小值；实际季节下限另由 P_th_min 逐时约束 ----
+        P_th_node_min = np.minimum(P_th_min_heating, P_th_min_nonheating)
+        frac = (np.arange(6) / 5.0)[None, :]                       # 0,0.2,...,1
+        P_th_node = P_th_node_min[:, None] + (P_th_max - P_th_node_min)[:, None] * frac
+        F_th_node = a_th[:, None] * P_th_node ** 2 + b_th[:, None] * P_th_node + c_th[:, None]
+
+        # ---- 六节点排放（MATLAB 145-156）：每台 6 行，NodeIndex 必须是 0..5；
+        # 碳排表节点坐标为历史 MIN_POWER_GEN 区间，插值到新节点，低端线性外推 ----
         em = _read(config.SYSTEM_FILE, "煤电碳排节点", ["UnitKey", "NodeIndex", "CO2Rate_t_h"])
         CO2_th_node = np.full((N_th, 6), np.nan)
         for i, key in enumerate(UnitKey_th):
@@ -180,12 +220,11 @@ class Thermal:
             nodes = {int(n): float(v) for n, v in zip(rows["NodeIndex"], rows["CO2Rate_t_h"])}
             if set(nodes) != set(range(6)):
                 raise KeyError(f"煤电 {key} NodeIndex 应为 0..5，实际 {sorted(nodes)}")
-            CO2_th_node[i, :] = [nodes[k] for k in range(6)]
-
-        # ---- 六节点燃料成本派生（MATLAB 105-106）----
-        frac = (np.arange(6) / 5.0)[None, :]                       # 0,0.2,...,1
-        P_th_node = P_th_min[:, None] + (P_th_max - P_th_min)[:, None] * frac
-        F_th_node = a_th[:, None] * P_th_node ** 2 + b_th[:, None] * P_th_node + c_th[:, None]
+            # MATLAB 152-155：oldPowerNodes = MIN_POWER_GEN..P_max 六等分；interp1 'linear','extrap'
+            oldPowerNodes = P_th_min_plain[i] + (P_th_max[i] - P_th_min_plain[i]) * np.arange(6) / 5.0
+            CO2_th_node[i, :] = _interp_extrap(oldPowerNodes,
+                                               np.array([nodes[k] for k in range(6)]),
+                                               P_th_node[i, :])
 
         for name, arr in [("P_th_rated", P_th_rated), ("P_th_max", P_th_max), ("P_th_min", P_th_min),
                           ("m_th", m_th),
@@ -218,18 +257,18 @@ class Thermal:
         """
         coal = self.inputs
         N, T = coal.N_th, coal.m_th.shape[1]
-        P_th       = m.addMVar((N, T),     lb=-INF, name="P_th")              # MATLAB 572
-        u_th       = m.addMVar((N, T),     vtype=gp.GRB.BINARY, name="u_th")  # 573
-        v_th       = m.addMVar((N, T),     vtype=gp.GRB.BINARY, name="v_th")  # 574
-        w_th       = m.addMVar((N, T),     vtype=gp.GRB.BINARY, name="w_th")  # 575
-        V_th_count = m.addMVar((N, T + 1), lb=-INF, name="V_th_count")        # 577
-        W_th_count = m.addMVar((N, T + 1), lb=-INF, name="W_th_count")        # 578
-        R_th_hot   = m.addMVar((N, T),     lb=-INF, name="R_th_hot")          # 579
-        R_th_cold  = m.addMVar((N, T),     lb=-INF, name="R_th_cold")         # 580
-        F_th       = m.addMVar((N, T),     lb=-INF, name="F_th")              # 581
-        CO2_th     = m.addMVar((N, T),     lb=-INF, name="CO2_th")            # 582
-        lambda_th  = m.addMVar((N, 6, T),  lb=-INF, name="lambda_th")          # 586
-        segment_th = m.addMVar((N, 5, T),  vtype=gp.GRB.BINARY, name="segment_th")  # 587
+        P_th       = m.addMVar((N, T),     lb=-INF, name="P_th")              
+        u_th       = m.addMVar((N, T),     vtype=gp.GRB.BINARY, name="u_th")
+        v_th       = m.addMVar((N, T),     vtype=gp.GRB.BINARY, name="v_th")
+        w_th       = m.addMVar((N, T),     vtype=gp.GRB.BINARY, name="w_th")
+        V_th_count = m.addMVar((N, T + 1), lb=-INF, name="V_th_count")
+        W_th_count = m.addMVar((N, T + 1), lb=-INF, name="W_th_count")
+        R_th_hot   = m.addMVar((N, T),     lb=-INF, name="R_th_hot")
+        R_th_cold  = m.addMVar((N, T),     lb=-INF, name="R_th_cold")
+        F_th       = m.addMVar((N, T),     lb=-INF, name="F_th")
+        CO2_th     = m.addMVar((N, T),     lb=-INF, name="CO2_th")
+        lambda_th  = m.addMVar((N, 6, T),  lb=-INF, name="lambda_th")
+        segment_th = m.addMVar((N, 5, T),  vtype=gp.GRB.BINARY, name="segment_th")
         self.vars = ThermalVars(P_th=P_th, u_th=u_th, v_th=v_th, w_th=w_th,
                                 V_th_count=V_th_count, W_th_count=W_th_count,
                                 R_th_hot=R_th_hot, R_th_cold=R_th_cold,
@@ -247,7 +286,7 @@ class Thermal:
             m (gp.Model): Gurobi 模型。
             inp (Inputs): 系统公共输入（本单元忽略）。
             sv (SystemVars): 系统层决策变量（本单元忽略）。
-
+            
         Returns:
             None
         """
@@ -258,70 +297,64 @@ class Thermal:
         u, v, w = var.u_th, var.v_th, var.w_th
         P, R_hot, R_cold = var.P_th, var.R_th_hot, var.R_th_cold
 
-        # ---- MATLAB 688-689：u - u_prev = v - w；首列 prev = u_th_0 ----
-        m.addConstr(u[:, 0] - coal.u_th_0 == v[:, 0] - w[:, 0], name="logic_t0")
+        m.addConstr(u[:, 0] - coal.u_th_0 == v[:, 0] - w[:, 0], name="logic_t0") # Math: u_{i,1} - u_{i,0} = v_{i,1} - w_{i,1}（首时段启停逻辑约束）
         if T > 1:
-            m.addConstr(u[:, 1:] - u[:, :-1] == v[:, 1:] - w[:, 1:], name="logic")
+            m.addConstr(u[:, 1:] - u[:, :-1] == v[:, 1:] - w[:, 1:], name="logic") # Math: u_{i,t} - u_{i,t-1} = v_{i,t} - w_{i,t}（常规时段启停逻辑约束）
 
-        # ---- MATLAB 690：v + w <= 1；u <= 1 - m ----
-        m.addConstr(v + w <= 1, name="vw")                                # 690
-        m.addConstr(u <= 1 - dt, name="um")                               # 690
+        m.addConstr(v + w <= 1, name="vw") # Math: v_{i,t} + w_{i,t} \le 1（同一时段不能同时启动和停机互斥约束）
+        m.addConstr(u <= 1 - dt, name="um") # Math: u_{i,t} \le 1 - m_{i,t}（计划检修状态必须停机约束）
 
-        # ——MATLAB 704 行头："Constraints = [Constraints, R_th_hot>=0, R_th_cold>=0]"
-        m.addConstr(R_hot >= 0, name="Rhotlb")                            # 694（一行拆两条）
-        m.addConstr(R_cold >= 0, name="Rcoldlb")                          # 694
+        m.addConstr(R_hot >= 0, name="Rhotlb") # Math: R_{th,i,t}^{hot} \ge 0（热备用容量非负约束）
+        m.addConstr(R_cold >= 0, name="Rcoldlb") # Math: R_{th,i,t}^{cold} \ge 0（冷备用容量非负约束）
 
-        # ---- MATLAB 691：P_min·u <= P ----
-        PminU = _col_repmat(coal, coal.P_th_min, T)
-        m.addConstr(PminU * u <= P, name="Pmin")                          # 691
+        PminU = coal.P_th_min                                # 已是 N×T 时变矩阵（MATLAB 738 直接点乘）
+        m.addConstr(PminU * u <= P, name="Pmin") # Math: P_{th,i}^{min} u_{i,t} \le P_{th,i,t}（最小稳定燃烧出力下限约束，P_min 逐时供暖切换）
 
-        # ---- MATLAB 693：P + R_hot <= Pmax·u ----
         PmaxU = _col_repmat(coal, coal.P_th_max, T)
-        m.addConstr(P + R_hot <= PmaxU * u, name="Pmax_hot")              # 693
+        m.addConstr(P + R_hot <= PmaxU * u, name="Pmax_hot") # Math: P_{th,i,t} + R_{th,i,t}^{hot} \le P_{th,i}^{max} u_{i,t}（最大技术出力与热备用容量上限约束）
 
-        # ---- MATLAB 695/696：R_cold <= Pmax(1-u)；R_cold <= Pmax(1-m) ----
-        m.addConstr(R_cold <= PmaxU * (1 - u), name="Rcold_u")            # 695
-        m.addConstr(R_cold <= PmaxU * (1 - dt), name="Rcold_m")           # 696
+        m.addConstr(R_cold <= PmaxU * (1 - u), name="Rcold_u") # Math: R_{th,i,t}^{cold} \le P_{th,i}^{max} (1 - u_{i,t})（在线机组不能提供冷备用约束）
+        m.addConstr(R_cold <= PmaxU * (1 - dt), name="Rcold_m") # Math: R_{th,i,t}^{cold} \le P_{th,i}^{max} (1 - m_{i,t})（检修机组不能提供冷备用约束）
 
-        # ---- MATLAB 697-701：爬坡。首时段 prev = P_th_0 / u_th_0，不经过 concatenate ----
         RU = _col_repmat(coal, coal.RU_th, T); SU = _col_repmat(coal, coal.SU_th, T)
         RD = _col_repmat(coal, coal.RD_th, T); SD = _col_repmat(coal, coal.SD_th, T)
         u0 = coal.u_th_0[:, None]; P0 = coal.P_th_0[:, None]     # N×1 初始状态/功率
         m.addConstr(P[:, 0:1] - P0 <= RU[:, 0:1] * u0 + SU[:, 0:1] * (u[:, 0:1] - u0),
-                    name="ramp_up_t0")                            # 698-699 首时段
+                    name="ramp_up_t0") # Math: P_{th,i,1} - P_{th,i,0} \le R_{th,i}^{U} u_{i,0} + S_{th,i}^{U} (u_{i,1} - u_{i,0})（首时段向上爬坡约束）
         m.addConstr(P0 - P[:, 0:1] <= RD[:, 0:1] * u[:, 0:1] + SD[:, 0:1] * (u0 - u[:, 0:1]),
-                    name="ramp_dn_t0")                            # 700-701 首时段
+                    name="ramp_dn_t0") # Math: P_{th,i,0} - P_{th,i,1} \le R_{th,i}^{D} u_{i,1} + S_{th,i}^{D} (u_{i,0} - u_{i,1})（首时段向下爬坡约束）
         if T > 1:
             u_prev = u[:, :-1]; P_prev = P[:, :-1]
             m.addConstr(P[:, 1:] - P_prev <= RU[:, 1:] * u_prev
-                        + SU[:, 1:] * (u[:, 1:] - u_prev), name="ramp_up")   # 其余时段
+                        + SU[:, 1:] * (u[:, 1:] - u_prev), name="ramp_up") # Math: P_{th,i,t} - P_{th,i,t-1} \le R_{th,i}^{U} u_{i,t-1} + S_{th,i}^{U} (u_{i,t} - u_{i,t-1})（常规时段向上爬坡约束）
             m.addConstr(P_prev - P[:, 1:] <= RD[:, 1:] * u[:, 1:]
-                        + SD[:, 1:] * (u_prev - u[:, 1:]), name="ramp_dn")
+                        + SD[:, 1:] * (u_prev - u[:, 1:]), name="ramp_dn") # Math: P_{th,i,t-1} - P_{th,i,t} \le R_{th,i}^{D} u_{i,t} + S_{th,i}^{D} (u_{i,t-1} - u_{i,t})（常规时段向下爬坡约束）
 
         # ---- MATLAB 704-706：累计启停量递推 ----
         Vc, Wc = var.V_th_count, var.W_th_count
-        m.addConstr(Vc[:, 0] == 0, name="Vinit"); m.addConstr(Wc[:, 0] == 0, name="Winit")  # 704
-        m.addConstr(Vc[:, 1:] - Vc[:, :-1] == v, name="Vrec")             # 705
-        m.addConstr(Wc[:, 1:] - Wc[:, :-1] == w, name="Wrec")             # 706
+        m.addConstr(Vc[:, 0] == 0, name="Vinit"); m.addConstr(Wc[:, 0] == 0, name="Winit") # Math: V_{i,0} = 0, \ W_{i,0} = 0（周期起点累计启停次数清零约束）
+        m.addConstr(Vc[:, 1:] - Vc[:, :-1] == v, name="Vrec") # Math: V_{i,t} - V_{i,t-1} = v_{i,t}（累计启动次数递推约束）
+        m.addConstr(Wc[:, 1:] - Wc[:, :-1] == w, name="Wrec") # Math: W_{i,t} - W_{i,t-1} = w_{i,t}（累计停机次数递推约束）
 
-        # ---- MATLAB 707-723：最小开停机。初始剩余义务 remaining 全为 0（已核数据），锁定行不触发 ----
+        # ---- MATLAB 707-723：最小开停机。初始剩余义务 remaining 全为 0 ----
         # remaining = clip(u0*T_up + (1-u0)*T_down - init_hours, 0, None)，>0 才建锁定行，镜像 MATLAB if 守卫。
         rem = np.clip(coal.u_th_0 * coal.T_th_up + (1 - coal.u_th_0) * coal.T_th_down
                       - coal.T_th_initial, 0, None)
         for i in range(N):
             if rem[i] > 0:
                 m.addConstr(u[i, :min(T, int(rem[i]))] == coal.u_th_0[i],
-                            name=f"lock_{i}")                             # 710
+                            name=f"lock_{i}") # Math: u_{i,t} = u_{i,0} \quad \forall t \le L_{i}（初始历史状态剩余时段锁定约束）
 
-        firstU = np.maximum(0, np.arange(T) - coal.T_th_up.astype(int)[:, None] + 1)   # MATLAB 716
-        firstD = np.maximum(0, np.arange(T) - coal.T_th_down.astype(int)[:, None] + 1) # MATLAB 719
-        m.addConstr(Vc[:, 1:] - Vc[np.arange(N)[:, None], firstU] <= u, name="minup")   # 717
-        m.addConstr(Wc[:, 1:] - Wc[np.arange(N)[:, None], firstD] <= 1 - u, name="mindn")  # 721
+        firstU = np.maximum(0, np.arange(T) - coal.T_th_up.astype(int)[:, None] + 1)
+        firstD = np.maximum(0, np.arange(T) - coal.T_th_down.astype(int)[:, None] + 1)
+        m.addConstr(Vc[:, 1:] - Vc[np.arange(N)[:, None], firstU] <= u, name="minup") # Math: \sum_{\tau=t-T_{up}+1}^{t} v_{i,\tau} \le u_{i,t}（最小连续开机时间约束）
+        m.addConstr(Wc[:, 1:] - Wc[np.arange(N)[:, None], firstD] <= 1 - u, name="mindn") # Math: \sum_{\tau=t-T_{dn}+1}^{t} w_{i,\tau} \le 1 - u_{i,t}（最小连续停机时间约束）
 
         # ---- MATLAB 724-737：五段分段线性（SOS2 等价）----
         lam, seg = var.lambda_th, var.segment_th
-        m.addConstr(lam >= 0, name="lam_lb")                              # 728
-        m.addConstr(lam.sum(axis=1) == u, name="lam_sum")                 # 729  Σλ_k = u
+        m.addConstr(lam >= 0, name="lam_lb") # Math: \lambda_{i,t,k} \ge 0（权重变量非负约束）
+        m.addConstr(lam.sum(axis=1) == u, name="lam_sum") # Math: \sum_{k=1}^{6} \lambda_{i,t,k} = u_{i,t}（分段线性化节点权重之和等于启停状态约束）
+        
         # P/F/CO2 = node·λ：N×T 个"行"约束，六节点混合权重（MATLAB 730-732）。
         # gurobipy 的 MVar@MVar 出 2 维，这里 λ 是 3 维，按机器维度循环第 3 维（时段）实现"每台每时刻一条"。
         # P/F/CO2 = node·λ：每台每时刻一条（MATLAB 730-732）。
@@ -332,20 +365,20 @@ class Thermal:
             lam_t = lam[:, :, t]                       # N×6 截面（2D MVar）
             for i in range(N):
                 m.addConstr(P[i, t] == gp.quicksum(lam_t[i, k] * coal.P_th_node[i, k] for k in range(K)),
-                            name=f"Pnode_{t}_{i}")       # 730
+                            name=f"Pnode_{t}_{i}") # Math: P_{th,i,t} = \sum_{k=1}^{6} \lambda_{i,t,k} P_{th,i,k}^{node}（节点权重表达实际有功出力约束）
                 m.addConstr(var.F_th[i, t] == gp.quicksum(lam_t[i, k] * coal.F_th_node[i, k] for k in range(K)),
-                            name=f"Fnode_{t}_{i}")       # 731
+                            name=f"Fnode_{t}_{i}") # Math: F_{th,i,t} = \sum_{k=1}^{6} \lambda_{i,t,k} F_{th,i,k}^{node}（节点权重表达燃料成本约束）
                 m.addConstr(var.CO2_th[i, t] == gp.quicksum(lam_t[i, k] * coal.CO2_th_node[i, k] for k in range(K)),
-                            name=f"Cnode_{t}_{i}")       # 732
-        m.addConstr(seg.sum(axis=1) == u, name="seg_sum")                 # 733
-        m.addConstr(lam[:, 0, :] <= seg[:, 0, :], name="lam_seg0")        # 734
-        m.addConstr(lam[:, 1:5, :] <= seg[:, 0:4, :] + seg[:, 1:5, :], name="lam_seg")  # 735
-        m.addConstr(lam[:, 5, :] <= seg[:, 4, :], name="lam_seg5")        # 736
+                            name=f"Cnode_{t}_{i}") # Math: E_{th,i,t}^{CO2} = \sum_{k=1}^{6} \lambda_{i,t,k} E_{th,i,k}^{CO2,node}（节点权重表达碳排放量约束）
+        m.addConstr(seg.sum(axis=1) == u, name="seg_sum") # Math: \sum_{s=1}^{5} z_{i,t,s} = u_{i,t}（区段指示变量之和等于启停状态约束）
+        m.addConstr(lam[:, 0, :] <= seg[:, 0, :], name="lam_seg0") # Math: \lambda_{i,t,1} \le z_{i,t,1}（SOS2首节点相邻非零约束）
+        m.addConstr(lam[:, 1:5, :] <= seg[:, 0:4, :] + seg[:, 1:5, :], name="lam_seg") # Math: \lambda_{i,t,k} \le z_{i,t,k-1} + z_{i,t,k} \quad (k=2,3,4,5)（SOS2中间节点相邻非零约束）
+        m.addConstr(lam[:, 5, :] <= seg[:, 4, :], name="lam_seg5") # Math: \lambda_{i,t,6} \le z_{i,t,5}（SOS2末节点相邻非零约束）
 
     def add_cost(self, dt: float, econ) -> dict:
         """镜像 MATLAB 4.1 节（1016-1025）汇总煤电成本表达式。
         加法顺序冻结，不得重排（浮点分组变即末位漂移）。
-        键名是对外成本合同，冻结。
+        键名是对外成本，冻结。
 
         Args:
             dt (float): 单位步长（小时）。
@@ -356,16 +389,16 @@ class Thermal:
         """
         T = self.inputs.m_th.shape[1]
         var, coal = self.vars, self.inputs
-        C_th_fuel  = dt * var.F_th.sum()                                # 1017
-        C_th_start = _wsum(coal.c_th_start, var.v_th, T)                 # 1018
-        C_th_stop  = _wsum(coal.c_th_stop, var.w_th, T)                  # 1019
-        C_th_FOM   = float(np.sum(coal.c_th_FOM * coal.P_th_rated))       # 1020 常数，v2 基数=额定
-        C_th_CO2   = econ.c_CO2 * dt * var.CO2_th.sum()                  # 1021
-        C_th_SO2   = econ.c_SO2 * dt * _wsum(coal.SO2_th_factor, var.P_th, T)      # 1022
-        C_th_NOX   = econ.c_NOX * dt * _wsum(coal.NOX_th_factor, var.P_th, T)      # 1023
-        C_th_dust  = econ.c_dust * dt * _wsum(coal.dust_th_factor, var.P_th, T)    # 1024
+        C_th_fuel  = dt * var.F_th.sum() # Math: C_{th,fuel} = \sum_{t=1}^{T} \sum_{i} F_{th,i,t} \Delta t（整个调度周期内煤电机组总燃料成本）
+        C_th_start = _wsum(coal.c_th_start, var.v_th, T) # Math: C_{th,start} = \sum_{t=1}^{T} \sum_{i} c_{th,i}^{start} v_{th,i,t}（煤电机组总启动成本）
+        C_th_stop  = _wsum(coal.c_th_stop, var.w_th, T) # Math: C_{th,stop} = \sum_{t=1}^{T} \sum_{i} c_{th,i}^{stop} w_{th,i,t}（煤电机组总停机成本）
+        C_th_FOM   = float(np.sum(coal.c_th_FOM * coal.P_th_rated)) # Math: C_{th,FOM} = \sum_{i} c_{th,i}^{FOM} P_{th,i}^{rated}（煤电机组固定运行维护成本）
+        C_th_CO2   = econ.c_CO2 * dt * var.CO2_th.sum() # Math: C_{th,CO2} = c_{CO2} \Delta t \sum_{t=1}^{T} \sum_{i} E_{th,i,t}^{CO2}（煤电机组碳排放成本）
+        C_th_SO2   = econ.c_SO2 * dt * _wsum(coal.SO2_th_factor, var.P_th, T) # Math: C_{th,SO2} = c_{SO2} \Delta t \sum_{t=1}^{T} \sum_{i} e_{th,i}^{SO2} P_{th,i,t}（煤电机组SO₂排放成本）
+        C_th_NOX   = econ.c_NOX * dt * _wsum(coal.NOX_th_factor, var.P_th, T) # Math: C_{th,NOX} = c_{NOX} \Delta t \sum_{t=1}^{T} \sum_{i} e_{th,i}^{NOX} P_{th,i,t}（煤电机组NOₓ排放成本）
+        C_th_dust  = econ.c_dust * dt * _wsum(coal.dust_th_factor, var.P_th, T) # Math: C_{th,dust} = c_{dust} \Delta t \sum_{t=1}^{T} \sum_{i} e_{th,i}^{dust} P_{th,i,t}（煤电机组烟尘排放成本）
         C_th = C_th_fuel + C_th_start + C_th_stop + C_th_FOM + \
-            C_th_CO2 + C_th_SO2 + C_th_NOX + C_th_dust                   # 1025
+            C_th_CO2 + C_th_SO2 + C_th_NOX + C_th_dust # Math: C_{th} = C_{th,fuel} + C_{th,start} + C_{th,stop} + C_{th,FOM} + C_{th,CO2} + C_{th,SO2} + C_{th,NOX} + C_{th,dust}（大区域煤电机组总运行成本）
         return {
             "C_th": C_th, "C_th_fuel": C_th_fuel, "C_th_start": C_th_start,
             "C_th_stop": C_th_stop, "C_th_FOM": C_th_FOM, "C_th_CO2": C_th_CO2,

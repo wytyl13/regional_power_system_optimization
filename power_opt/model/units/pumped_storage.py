@@ -76,6 +76,18 @@ class PumpedStorage:
         req_ps = ["UnitKey", "SUBSTR(C.ID，12)", "CAP", "PUMP_MIN_MW", "MAX_POWER_CHARGE",
                   "GEN_AFFI_FACTOR", "CHAEGE_AFFI_FACTOR", "ENERGY_MWH",
                   "SOC_MIN", "SOC_MAX", "SOC_INITIAL", "FOM_COST_PERIOD", "NAME"]
+        """
+        CAP：额定容量（发电功率上限）
+        PUMP_MIN_MW：最小抽水吸收功率
+        MAX_POWER_CHARGE：最大抽水功率
+        GEN_AFFI_FACTOR：发电效率，0~1
+        CHAEGE_AFFI_FACTOR：抽水效率，0~1
+        ENERGY_MWH：最大等效储能容量
+        SOC_MIN：最小SOC，0~1
+        SOC_MAX：最大SOC，0~1
+        SOC_INITIAL：初始SOC，0~1
+        FOM_COST_PERIOD：年度功率运维成本
+        """
         psData = _read(config.UNIT_FILE, "抽水蓄能", req_ps)
         N_ps = len(psData)
         zone_ps = [_zstr(v) for v in psData["SUBSTR(C.ID，12)"]]
@@ -128,12 +140,12 @@ class PumpedStorage:
         """
         ps = self.inputs
         N, T = ps.N_ps, ps.m_ps.shape[1]
-        P_ps_gen  = m.addMVar((N, T), lb=-INF, name="P_ps_gen")       # 622
-        P_ps_pump = m.addMVar((N, T), lb=-INF, name="P_ps_pump")      # 623
-        u_ps_gen  = m.addMVar((N, T), vtype=gp.GRB.BINARY, name="u_ps_gen")    # 624
-        u_ps_pump = m.addMVar((N, T), vtype=gp.GRB.BINARY, name="u_ps_pump")   # 625
-        R_ps_hot  = m.addMVar((N, T), lb=-INF, name="R_ps_hot")       # 628
-        E_ps      = m.addMVar((N, T + 1), lb=-INF, name="E_ps")       # 629
+        P_ps_gen  = m.addMVar((N, T), lb=-INF, name="P_ps_gen")
+        P_ps_pump = m.addMVar((N, T), lb=-INF, name="P_ps_pump")
+        u_ps_gen  = m.addMVar((N, T), vtype=gp.GRB.BINARY, name="u_ps_gen")
+        u_ps_pump = m.addMVar((N, T), vtype=gp.GRB.BINARY, name="u_ps_pump")
+        R_ps_hot  = m.addMVar((N, T), lb=-INF, name="R_ps_hot")
+        E_ps      = m.addMVar((N, T + 1), lb=-INF, name="E_ps")
         self.vars = PSVars(P_ps_gen=P_ps_gen, P_ps_pump=P_ps_pump, u_ps_gen=u_ps_gen,
                            u_ps_pump=u_ps_pump, R_ps_hot=R_ps_hot, E_ps=E_ps)
         return self.vars
@@ -159,45 +171,46 @@ class PumpedStorage:
         Pmax = np.repeat(ps.P_ps_max[:, None], T, axis=1)
 
         # ---- MATLAB 837：0 <= P_gen、P_gen <= Pmax·u_gen ----
-        m.addConstr(0 <= Pgen, name="Pgen_lb")
-        m.addConstr(Pgen <= Pmax * ugen, name="Pgen_ub")
+        m.addConstr(0 <= Pgen, name="Pgen_lb") # Math: P_{g,i,t} \ge 0（发电功率非负约束）
+        m.addConstr(Pgen <= Pmax * ugen, name="Pgen_ub") # Math: P_{g,i,t} \le P_{g,i}^{max} u_{g,i,t}（发电功率上限约束）
+        
         # ---- MATLAB 838/839：Pmin_pump·u_pump <= P_pump <= Pmax_pump·u_pump ----
         Pmin_pump = np.repeat(ps.P_ps_pump_min[:, None], T, axis=1)
         Pmax_pump = np.repeat(ps.P_ps_pump_max[:, None], T, axis=1)
-        m.addConstr(Pmin_pump * upump <= Ppump, name="Ppump_lb")
-        m.addConstr(Ppump <= Pmax_pump * upump, name="Ppump_ub")
+        m.addConstr(Pmin_pump * upump <= Ppump, name="Ppump_lb") # Math: P_{p,i}^{min} u_{p,i,t} \le P_{p,i,t}（抽水功率下限约束）
+        m.addConstr(Ppump <= Pmax_pump * upump, name="Ppump_ub") # Math: P_{p,i,t} \le P_{p,i}^{max} u_{p,i,t}（抽水功率上限约束）
         # ---- MATLAB 840：抽发互斥 ----
-        m.addConstr(ugen + upump <= 1, name="mutex")
+        m.addConstr(ugen + upump <= 1, name="mutex") # Math: u_{g,i,t} + u_{p,i,t} \le 1（同一时段不能同时发电和抽水互斥约束）
         # ---- MATLAB 841：检修不可用（右端 1-m_ps 常数矩阵）----
-        m.addConstr(ugen <= 1 - ps.m_ps, name="u_gen_maint")
-        m.addConstr(upump <= 1 - ps.m_ps, name="u_pump_maint")
+        m.addConstr(ugen <= 1 - ps.m_ps, name="u_gen_maint") # Math: u_{g,i,t} \le 1 - m_{ps,i,t}（计划检修状态禁止发电约束）
+        m.addConstr(upump <= 1 - ps.m_ps, name="u_pump_maint") # Math: u_{p,i,t} \le 1 - m_{ps,i,t}（计划检修状态禁止抽水约束）
         # ---- MATLAB 844/845：单机方向 ≤ 所在分区方向（借系统层 u_ps_area）----
-        m.addConstr(ugen <= sv.u_ps_area_gen[ps.area_ps, :], name="u_gen_area")
-        m.addConstr(upump <= sv.u_ps_area_pump[ps.area_ps, :], name="u_pump_area")
+        m.addConstr(ugen <= sv.u_ps_area_gen[ps.area_ps, :], name="u_gen_area") # Math: u_{g,i,t} \le u_{ps,A(t)}^{gen}（单机发电方向不超所在分区方向约束）
+        m.addConstr(upump <= sv.u_ps_area_pump[ps.area_ps, :], name="u_pump_area") # Math: u_{p,i,t} \le u_{ps,A(t)}^{pump}（单机抽水方向不超所在分区方向约束）
         # ---- MATLAB 847：SOC 递推（无自放电；抽水 +、发电 −）----
         eta_pump = np.repeat(ps.eta_ps_pump[:, None], T, axis=1)
         inv_eta_gen = np.repeat((1.0 / ps.eta_ps_gen)[:, None], T, axis=1)
         m.addConstr(E[:, 1:] == E[:, :-1]
                     + eta_pump * Ppump * Delta_t
-                    - inv_eta_gen * Pgen * Delta_t, name="soc")
+                    - inv_eta_gen * Pgen * Delta_t, name="soc") # Math: E_{i,t} = E_{i,t-1} + \eta_{pump,i} P_{p,i,t} \Delta t - P_{g,i,t} \Delta t / \eta_{gen,i}（储能能量递推平衡约束）
         # ---- MATLAB 851/852：E 界（E_ps(:) 展开 N×(T+1) 行）----
         Emin = np.repeat((ps.E_ps_max * ps.SOC_ps_min)[:, None], T + 1, axis=1)
         Emax = np.repeat((ps.E_ps_max * ps.SOC_ps_max)[:, None], T + 1, axis=1)
-        m.addConstr(Emin <= E, name="E_lb")
-        m.addConstr(E <= Emax, name="E_ub")
+        m.addConstr(Emin <= E, name="E_lb") # Math: E_{i,t} \ge SOC_{i}^{min} E_{i}^{max}（储能能量下限约束）
+        m.addConstr(E <= Emax, name="E_ub") # Math: E_{i,t} \le SOC_{i}^{max} E_{i}^{max}（储能能量上限约束）
         # ---- MATLAB 853：首末能量相等 ----
         E0 = ps.E_ps_initial[:, None]
-        m.addConstr(E[:, 0:1] == E0, name="E_init")
-        m.addConstr(E[:, T:T + 1] == E0, name="E_end")
+        m.addConstr(E[:, 0:1] == E0, name="E_init") # Math: E_{i,0} = E_{i}^{ini}（周期能量初值约束）
+        m.addConstr(E[:, T:T + 1] == E0, name="E_end") # Math: E_{i,T} = E_{i}^{ini}（周期末能量回归初值约束）
         # ---- MATLAB 856/857：热备用受发电状态与功率余量限制 ----
-        m.addConstr(0 <= R, name="R_lb")
-        m.addConstr(Pgen + R <= Pmax * ugen, name="R_ub")
+        m.addConstr(0 <= R, name="R_lb") # Math: R_{ps,i,t} \ge 0（热备用容量非负约束）
+        m.addConstr(Pgen + R <= Pmax * ugen, name="R_ub") # Math: P_{g,i,t} + R_{ps,i,t} \le P_{g,i}^{max} u_{g,i,t}（发电功率与热备用容量上限约束）
         # ---- MATLAB 858：备用能量限制 rd·R <= eta_gen·(E(2:T+1)-Emin) ----
         rd = inp.prov.reserveDuration[inp.areas.areaProvince[ps.area_ps]]        # 省级参数领行
         rdT = np.repeat(np.asarray(rd, float)[:, None], T, axis=1)
         eta_gen = np.repeat(ps.eta_ps_gen[:, None], T, axis=1)
         EminT = np.repeat((ps.E_ps_max * ps.SOC_ps_min)[:, None], T, axis=1)
-        m.addConstr(rdT * R <= eta_gen * (E[:, 1:] - EminT), name="R_energy")
+        m.addConstr(rdT * R <= eta_gen * (E[:, 1:] - EminT), name="R_energy") # Math: r_{d} R_{ps,i,t} \le \eta_{gen,i} (E_{i,t} - E_{i}^{min})（热备用容量可用能量限制约束）
 
     def add_cost(self, dt: float, econ) -> dict:
         """镜像 MATLAB 4.6 节（1051-1052）汇总抽蓄成本表达式。
@@ -211,7 +224,7 @@ class PumpedStorage:
             dict: 抽蓄成本表达式与分项（键名与 solve 层成本 dict 一致）。
         """
         ps = self.inputs
-        C_ps = float(np.sum(ps.c_ps_FOM * ps.P_ps_max))               # 1052 仅 FOM，无变动成本
+        C_ps = float(np.sum(ps.c_ps_FOM * ps.P_ps_max)) # Math: C_{ps} = \sum_{i} c_{ps,i}^{FOM} P_{ps,i}^{max}（抽水蓄能电站固定运行维护成本）
         return {"C_ps": C_ps}
 
 

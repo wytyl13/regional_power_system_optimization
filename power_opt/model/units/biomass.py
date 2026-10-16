@@ -31,7 +31,7 @@ class BiomassInputs:
     UnitKey_bio: list                            # 分区唯一编号
     area_bio: np.ndarray                         # 机组 → 分区（0 基）
     P_bio_rated: np.ndarray                      # 额定容量，仅固定运维基数（MATLAB 235）
-    P_bio_max: np.ndarray; P_bio_min: np.ndarray  # 非供暖期可用上限，MW / 最小出力，MW
+    P_bio_max: np.ndarray; P_bio_min: np.ndarray  # 非供暖期可用上限，MW / 最小出力 N_bio×T（供暖日历切换），MW
     m_bio: np.ndarray                            # 检修：1 检修，0 可用（N_bio×T）
     c_bio_FOM: np.ndarray                        # 本周期元/MW
     c_bio_gen: np.ndarray                        # 线性单位发电成本，元/MWh（MATLAB 236）
@@ -71,9 +71,25 @@ class Biomass:
         T = inp.time.T
         mtn_bio = inp.maintenance[inp.maintenance["Type"].astype(str) == "生物质"]
 
-        req_bio = ["UnitKey", "SUBSTR(C.ID，12)", "CAP", "DERATE_RATE", "MIN_POWER_GEN", "GEN_COST",
+        req_bio = ["UnitKey", "SUBSTR(C.ID，12)", "CAP", "DERATE_RATE",
+                   "MIN_RATIO_HEATING", "MIN_RATIO_NONHEATING", "GEN_COST",
                    "INIT_POWER", "RAMP_LIMIT_UP", "RAMP_LIMIT_DOWN", "START_RAMP",
                    "STOP_RAMP", "INIT_MAINTENANCE", "FOM_COST_PERIOD", "ENERGY_LIMIT_MWH"]
+        """
+        CAP：额定容量
+        DERATE_RATE：非供暖受阻率
+        MIN_RATIO_HEATING：供暖期最小技术出力率（×额定CAP得MW）
+        MIN_RATIO_NONHEATING：非供暖期最小技术出力率（×额定CAP得MW）
+        GEN_COST：单位发电成本，元/MWh
+        INIT_POWER：周期前功率（初始出力）
+        RAMP_LIMIT_UP：向上爬坡（允许的功率上升速率）
+        RAMP_LIMIT_DOWN：向下爬坡（允许的功率下降速率）
+        START_RAMP：启动允许功率变化
+        STOP_RAMP：停机允许功率变化
+        INIT_MAINTENANCE：周期前检修状态，0/1
+        FOM_COST_PERIOD：年度功率运维成本
+        ENERGY_LIMIT_MWH：本次可用发电量上限
+        """
         bioData = _read(config.UNIT_FILE, "生物质", req_bio)
         N_bio = len(bioData)
         zone_bio = [_zstr(v) for v in bioData["SUBSTR(C.ID，12)"]]
@@ -85,7 +101,15 @@ class Biomass:
         UnitKey_bio = bioData["UnitKey"].astype(str).tolist()
         # MATLAB 235-236：额定容量只作固定运维基数；出力上限=额定×(1-受阻率)
         P_bio_rated = f("CAP")
-        P_bio_max = P_bio_rated * (1.0 - f("DERATE_RATE")); P_bio_min = f("MIN_POWER_GEN")
+        P_bio_max = P_bio_rated * (1.0 - f("DERATE_RATE"))
+        # MATLAB 272-276：两期出力率均以额定容量 CAP 为基准，按供暖日历逐时切换
+        zonePos = {z: i for i, z in enumerate(inp.heating.ZoneID)}
+        if miss := [z for z in zone_bio if z not in zonePos]:
+            raise KeyError(f"生物质分区编号 {set(miss)} 不在供暖期设置表中")
+        P_bio_min_heating = P_bio_rated * f("MIN_RATIO_HEATING")
+        P_bio_min_nonheating = P_bio_rated * f("MIN_RATIO_NONHEATING")
+        heat = inp.heating.isHeatingPeriod[[zonePos[z] for z in zone_bio], :]   # ismember 行序
+        P_bio_min = P_bio_min_nonheating[:, None] + (P_bio_min_heating - P_bio_min_nonheating)[:, None] * heat  # 机组×T，MW
         c_bio_gen = inp.econ.costScale * f("GEN_COST")
         P_bio_0 = f("INIT_POWER"); RU_bio = f("RAMP_LIMIT_UP"); RD_bio = f("RAMP_LIMIT_DOWN")
         SU_bio = f("START_RAMP"); SD_bio = f("STOP_RAMP")
@@ -132,7 +156,7 @@ class Biomass:
         """
         bio = self.inputs
         N, T = bio.N_bio, bio.m_bio.shape[1]
-        P_bio = m.addMVar((N, T), lb=-INF, name="P_bio")                     # MATLAB 604
+        P_bio = m.addMVar((N, T), lb=-INF, name="P_bio")
         self.vars = BiomassVars(P_bio=P_bio)
         return self.vars
 
@@ -155,11 +179,11 @@ class Biomass:
         P = var.P_bio
         u_bio = 1 - bio.m_bio                                     # MATLAB 782，常数矩阵
 
-        # ---- MATLAB 783-784：P_min·u_bio <= P_bio <= P_max·u_bio（右端全常数）----
-        PminU = np.repeat(bio.P_bio_min[:, None], T, axis=1) * u_bio    # repmat(P_min).*u
+        # ---- MATLAB 783-784：P_min·u_bio <= P_bio <= P_max·u_bio（P_min 已是 N×T 时变矩阵）----
+        PminU = bio.P_bio_min * u_bio                                   # P_min(逐时).*u
         PmaxU = np.repeat(bio.P_bio_max[:, None], T, axis=1) * u_bio    # repmat(P_max).*u
-        m.addConstr(PminU <= P, name="Pmin")                                # 783
-        m.addConstr(P <= PmaxU, name="Pmax")                                # 784
+        m.addConstr(PminU <= P, name="Pmin") # Math: P_{bio,i}^{min} u_{bio,i,t} \le P_{bio,i,t}（最小技术出力下限约束）
+        m.addConstr(P <= PmaxU, name="Pmax") # Math: P_{bio,i,t} \le P_{bio,i}^{max} u_{bio,i,t}（最大技术出力上限约束）
 
         # ---- MATLAB 785-788：previous 拼接（首列用初值）----
         m_prev = np.concatenate([bio.m_bio_0[:, None], bio.m_bio[:, :-1]], axis=1)      # 786
@@ -170,16 +194,16 @@ class Biomass:
         RD = np.repeat(bio.RD_bio[:, None], T, axis=1) * u_bio              # repmat(RD).*u_bio
         SD = np.repeat(bio.SD_bio[:, None], T, axis=1) * bio.m_bio          # repmat(SD).*m_bio
         P0 = bio.P_bio_0[:, None]
-        m.addConstr(P[:, 0:1] - P0 <= RU[:, 0:1] + SU[:, 0:1], name="ramp_up_t0")   # 789-790 首时段
-        m.addConstr(P0 - P[:, 0:1] <= RD[:, 0:1] + SD[:, 0:1], name="ramp_dn_t0")   # 791-792 首时段
+        m.addConstr(P[:, 0:1] - P0 <= RU[:, 0:1] + SU[:, 0:1], name="ramp_up_t0") # Math: P_{bio,i,1} - P_{bio,i,0} \le R_{bio,i}^{U} u_{bio,i,0} + S_{bio,i}^{U} m_{bio,i,0}（首时段向上爬坡约束）
+        m.addConstr(P0 - P[:, 0:1] <= RD[:, 0:1] + SD[:, 0:1], name="ramp_dn_t0") # Math: P_{bio,i,0} - P_{bio,i,1} \le R_{bio,i}^{D} u_{bio,i,1} + S_{bio,i}^{D} m_{bio,i,1}（首时段向下爬坡约束）
         if T > 1:
-            m.addConstr(P[:, 1:] - P[:, :-1] <= RU[:, 1:] + SU[:, 1:], name="ramp_up")
-            m.addConstr(P[:, :-1] - P[:, 1:] <= RD[:, 1:] + SD[:, 1:], name="ramp_dn")
+            m.addConstr(P[:, 1:] - P[:, :-1] <= RU[:, 1:] + SU[:, 1:], name="ramp_up") # Math: P_{bio,i,t} - P_{bio,i,t-1} \le R_{bio,i}^{U} u_{bio,i,t-1} + S_{bio,i}^{U} m_{bio,i,t-1}（常规时段向上爬坡约束）
+            m.addConstr(P[:, :-1] - P[:, 1:] <= RD[:, 1:] + SD[:, 1:], name="ramp_dn") # Math: P_{bio,i,t-1} - P_{bio,i,t} \le R_{bio,i}^{D} u_{bio,i,t} + S_{bio,i}^{D} m_{bio,i,t}（常规时段向下爬坡约束）
 
         # ---- MATLAB 795：年度/本次周期可用燃料对应的累计发电量上限，每台一行 ----
         for i in range(N):
             m.addConstr(gp.quicksum(P[i, :]) * bio.Delta_t <= bio.E_bio_limit[i],
-                        name=f"energy_{i}")
+                        name=f"energy_{i}") # Math: \sum_{t=1}^{T} P_{bio,i,t} \Delta t \le E_{bio,i}^{limit}（周期累计发电量燃料上限约束）
 
     def add_cost(self, dt: float, econ) -> dict:
         """镜像 MATLAB 4.3 节（1035-1038）汇总生物质成本表达式。
@@ -194,9 +218,9 @@ class Biomass:
         """
         T = self.inputs.m_bio.shape[1]
         var, bio = self.vars, self.inputs
-        C_bio_gen = dt * _wsum(bio.c_bio_gen, var.P_bio, T)                # 1036
-        C_bio_FOM = float(np.sum(bio.c_bio_FOM * bio.P_bio_rated))           # 1037 常数，v2 基数=额定
-        C_bio = C_bio_gen + C_bio_FOM                                         # 1038
+        C_bio_gen = dt * _wsum(bio.c_bio_gen, var.P_bio, T) # Math: C_{bio,gen} = \Delta t \sum_{t=1}^{T} \sum_{i} b_{bio,i} P_{bio,i,t}（生物质机组总发电成本）
+        C_bio_FOM = float(np.sum(bio.c_bio_FOM * bio.P_bio_rated)) # Math: C_{bio,FOM} = \sum_{i} c_{bio,i}^{FOM} P_{bio,i}^{rated}（生物质机组固定运行维护成本）
+        C_bio = C_bio_gen + C_bio_FOM # Math: C_{bio} = C_{bio,gen} + C_{bio,FOM}（生物质机组总运行成本）
         return {"C_bio": C_bio, "C_bio_gen": C_bio_gen, "C_bio_FOM": C_bio_FOM}
 
 
@@ -207,7 +231,7 @@ if __name__ == "__main__":
     bi.load(inp)
     bio = bi.inputs
     print('输入自检: N_bio=%d, m_bio sum=%s, FOM常数=%.2f'
-          % (bio.N_bio, bio.m_bio.sum(), float(np.sum(bio.c_bio_FOM * bio.P_bio_rated))))  # MATLAB 1037 基数=额定
+          % (bio.N_bio, bio.m_bio.sum(), float(np.sum(bio.c_bio_FOM * bio.P_bio_rated))))
 
     m = gp.Model()
     bi.add_vars(m)

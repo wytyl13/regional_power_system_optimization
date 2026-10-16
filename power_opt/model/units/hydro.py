@@ -9,7 +9,7 @@
 机组行来自分区机组信息表[径流式水电/库容式水电]（AreaID 分区列，非 SUBSTR）；
 月参数来自算例系统参数[水电月参数]（海南 v2：按水文情景筛行、月值展开为小时，
 每台库容水电 × 每个覆盖月份 = 一个调节周期；替代 v1 的水电时序/调节周期两表）。
-守卫纪律（坑 4 镜像）：3.4 节 if N_hyd_ror>0 / if N_hyd_res>0 逐行照抄不增不删。
+3.4 节 if N_hyd_ror>0 / if N_hyd_res>0 逐行照抄不增不删。
 E_hyd_curt 变量无条件建、无条件进目标（第 1 轮坑 2 的根源：空机组表+周期有行
 = 无界），靠数据副本保证不发生，本模块不自行兜底。
 """
@@ -69,6 +69,11 @@ class Hydro:
             None
         """
         req_hyd = ["UnitKey", "AreaID", "CAP", "FOM_COST_PERIOD"]
+        """
+        AreaID：分区编号（分区表主键）
+        CAP：额定容量
+        FOM_COST_PERIOD：年度功率运维成本
+        """
         rorData = _read(config.UNIT_FILE, "径流式水电", req_hyd)
         resData = _read(config.UNIT_FILE, "库容式水电", req_hyd)
         N_ror, N_res = len(rorData), len(resData)
@@ -166,10 +171,10 @@ class Hydro:
         """
         hyd = self.inputs
         T = self._T
-        P_hyd_ror = m.addMVar((hyd.N_hyd_ror, T), lb=-INF, name="P_hyd_ror")     # 611
-        P_hyd_res = m.addMVar((hyd.N_hyd_res, T), lb=-INF, name="P_hyd_res")     # 612
-        R_hyd_hot = m.addMVar((hyd.N_hyd_res, T), lb=-INF, name="R_hyd_hot")     # 613
-        E_hyd_curt = m.addMVar((hyd.N_hyd_period, 1), lb=-INF, name="E_hyd_curt")  # 614
+        P_hyd_ror = m.addMVar((hyd.N_hyd_ror, T), lb=-INF, name="P_hyd_ror")
+        P_hyd_res = m.addMVar((hyd.N_hyd_res, T), lb=-INF, name="P_hyd_res")
+        R_hyd_hot = m.addMVar((hyd.N_hyd_res, T), lb=-INF, name="R_hyd_hot")
+        E_hyd_curt = m.addMVar((hyd.N_hyd_period, 1), lb=-INF, name="E_hyd_curt")
         self.vars = HydVars(P_hyd_ror=P_hyd_ror, P_hyd_res=P_hyd_res,
                             R_hyd_hot=R_hyd_hot, E_hyd_curt=E_hyd_curt)
         return self.vars
@@ -190,23 +195,23 @@ class Hydro:
         hyd = self.inputs
         var = self.vars
         if hyd.N_hyd_ror > 0:                                            # MATLAB 803
-            m.addConstr(hyd.P_hyd_ror_min <= var.P_hyd_ror, name="ror_lb")        # 804
-            m.addConstr(var.P_hyd_ror <= hyd.P_hyd_ror_expected, name="ror_ub")
+            m.addConstr(hyd.P_hyd_ror_min <= var.P_hyd_ror, name="ror_lb") # Math: P_{ror,i}^{min} \le P_{ror,i,t}（径流式水电最小出力下限约束）
+            m.addConstr(var.P_hyd_ror <= hyd.P_hyd_ror_expected, name="ror_ub") # Math: P_{ror,i,t} \le P_{ror,i}^{exp}（径流式水电最大出力上限约束）
         if hyd.N_hyd_res > 0:                                            # MATLAB 806
-            m.addConstr(hyd.P_hyd_res_min <= var.P_hyd_res, name="res_lb")        # 807
-            m.addConstr(0 <= var.R_hyd_hot, name="res_R_lb")                      # 808
+            m.addConstr(hyd.P_hyd_res_min <= var.P_hyd_res, name="res_lb") # Math: P_{res,i}^{min} \le P_{res,i,t}（库容式水电最小出力下限约束）
+            m.addConstr(0 <= var.R_hyd_hot, name="res_R_lb") # Math: R_{res,i,t} \ge 0（库容式水电热备用容量非负约束）
             m.addConstr(var.P_hyd_res + var.R_hyd_hot
-                        <= hyd.P_hyd_res_expected, name="res_R_ub")
+                        <= hyd.P_hyd_res_expected, name="res_R_ub") # Math: P_{res,i,t} + R_{res,i,t} \le P_{res,i}^{exp}（库容式水电出力与热备用容量上限约束）
             for k in range(hyd.N_hyd_period):                            # MATLAB 809
                 i = hyd.hydPeriodUnit[k]
                 periods = hyd.hydPeriodHours[k]
                 # MATLAB 813：E_hyd_used = sum(P+R over 周期时段)*Delta_t（表达式不建行）
                 E_used = (var.P_hyd_res[i, periods].sum()
                           + var.R_hyd_hot[i, periods].sum()) * inp.time.Delta_t
-                m.addConstr(E_used <= hyd.E_hyd_available[k], name=f"period_budget_{k}")
+                m.addConstr(E_used <= hyd.E_hyd_available[k], name=f"period_budget_{k}") # Math: \sum_{t \in T_{k}} (P_{res,i,t} + R_{res,i,t}) \Delta t \le E_{hyd,k}^{avail}（供水期周期可用电量上限约束）
                 m.addConstr(var.E_hyd_curt[k, 0] == hyd.E_hyd_available[k] - E_used,
-                            name=f"period_curt_{k}")
-                m.addConstr(var.E_hyd_curt[k, 0] >= 0, name=f"curt_lb_{k}")
+                            name=f"period_curt_{k}") # Math: E_{hyd,k}^{curt} = E_{hyd,k}^{avail} - \sum_{t \in T_{k}} (P_{res,i,t} + R_{res,i,t}) \Delta t（周期弃水电量定义约束）
+                m.addConstr(var.E_hyd_curt[k, 0] >= 0, name=f"curt_lb_{k}") # Math: E_{hyd,k}^{curt} \ge 0（周期弃水电量非负约束）
 
     def add_cost(self, dt: float, econ) -> dict:
         """镜像 MATLAB 4.4 节（1040-1044）汇总水电成本表达式。
@@ -223,8 +228,8 @@ class Hydro:
         hyd = self.inputs
         C_hyd = float(econ.fixedCostScale
                       * (np.sum(hyd.FOM_ror * hyd.CAP_ror)
-                         + np.sum(hyd.FOM_res * hyd.CAP_res)))          # 1042-1043 仅 FOM 常数
-        C_hyd_curt = econ.c_hyd_curt * self.vars.E_hyd_curt.sum()           # 1044 弃水惩罚
+                         + np.sum(hyd.FOM_res * hyd.CAP_res))) # Math: C_{hyd} = \sum_{i} c_{ror,i}^{FOM} P_{ror,i}^{N} + \sum_{i} c_{res,i}^{FOM} P_{res,i}^{N}（水电机组固定运行维护成本）
+        C_hyd_curt = econ.c_hyd_curt * self.vars.E_hyd_curt.sum() # Math: C_{hyd,curt} = c_{hyd}^{curt} \sum_{k} E_{hyd,k}^{curt}（水电总弃水惩罚成本）
         return {"C_hyd": C_hyd, "C_hyd_curt": C_hyd_curt}
 
 
@@ -237,7 +242,7 @@ if __name__ == "__main__":
     T = inp.time.T
     fom_const = float(inp.econ.fixedCostScale
                       * (np.sum(hyd.FOM_ror * hyd.CAP_ror)
-                         + np.sum(hyd.FOM_res * hyd.CAP_res)))      # MATLAB 1036-1037
+                         + np.sum(hyd.FOM_res * hyd.CAP_res)))
     print('输入自检: N_ror=%d, N_res=%d, N_period=%d' %
           (hyd.N_hyd_ror, hyd.N_hyd_res, hyd.N_hyd_period))
     if hyd.N_hyd_ror > 0:

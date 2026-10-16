@@ -6,7 +6,8 @@
 @File    : compare.py
 读两边最新的合并时序 CSV 逐列比对（海南 v2 口径，不再重新求解）：
   MATLAB: {MATLAB_DIR}/results/T{T}_gap*_{时间戳}/ 时序结果_T{T}.csv + 海南{T}小时计算结果.mat(report)
-  Python: {RESULT_DIR}/T{T}_gap*_{时间戳}/      时序结果_T{T}.csv + 结果.json(report)
+  Python: {RESULT_DIR}/T{T}_gap*_{时间戳}/      时序结果_T{T}.csv + 结果.json(four_items/metrics，
+          v2 瘦身后 objective 自 four_items 读、参考指标自 metrics 读)
 判定两段式（2026-09-22 用户定）：
   第一段（硬门槛，不达标即 FAIL）：目标值相对偏差 ≤1e-6；各变量组逐小时总出力
     （u_* 组即逐小时开机台数和）最大差 ≤1e-6。
@@ -69,17 +70,20 @@ def run(T: int, obj_ref: float | None = None):
     assert len(mat_csv) == len(py_csv) == T, f"行数应等于 T={T}"
     print("结构一致：列数 %d（含 Time），行数 %d" % (len(mat_csv.columns), len(mat_csv)))
 
-    # ---- 1) report：目标值（硬门槛）+ 关键指标参考差 ----
-    rep_py = json.load(open(f"{py_dir}/结果.json", encoding="utf-8"))["report"]
+    # ---- 1) 目标值（硬门槛）+ 关键指标参考差 ----
+    # Python 侧结果.json 已 v2 瘦身：objective 在 four_items、参考指标在 metrics
+    doc_py = json.load(open(f"{py_dir}/结果.json", encoding="utf-8"))
+    mets_py = doc_py.get("metrics", {})
+    mets_py["mipGap"] = doc_py["four_items"]["objective"]["mipGapPct"] / 100
     rep_mat = sio.loadmat(f"{mat_dir}/海南{T}小时计算结果.mat",
                           struct_as_record=False, squeeze_me=True)["report"]
     obj_mat = obj_ref if obj_ref is not None else float(rep_mat.objectiveYuan)
-    obj_py = float(rep_py["objectiveYuan"])
+    obj_py = float(doc_py["four_items"]["objective"]["value"])
     rel_obj = (obj_py - obj_mat) / obj_mat
     ok_obj = abs(rel_obj) <= 1e-6
     print("目标值 python=%.6f  matlab=%.6f  相对偏差=%.3e" % (obj_py, obj_mat, rel_obj))
     for k in ["renewableUtilization", "CO2_t", "energyNotServedMWh", "mipGap"]:
-        print("  [参考] %s: py=%s  mat=%s" % (k, rep_py[k], getattr(rep_mat, k)))
+        print("  [参考] %s: py=%s  mat=%s" % (k, mets_py.get(k), getattr(rep_mat, k)))
 
     # ---- 2) 逐变量组：硬门槛逐小时总和；软口径逐格（孪生机组互换只报不判）----
     groups: dict[str, list[str]] = {}

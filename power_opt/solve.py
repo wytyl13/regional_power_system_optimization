@@ -9,6 +9,8 @@
 海南 v2：FOM 基数改额定容量（4.1/4.2/4.3）、新增 4.9 友好电站成本、
 求解参数镜像 1164-1168、新指标镜像 1177-1190。
 八电源已全部类化：UNITS 列表 = 建序合同（变量/约束/成本三处共用，冻结）。
+2026-10-16 光热（csp）尾插接入：对照 MATLAB 2.11/3.11/4.11/981，
+海南 N_csp=0 → 变量/约束/成本增量全 0，T24 对拍应逐位不变。
 """
 
 from __future__ import annotations
@@ -19,8 +21,7 @@ from datetime import datetime
 
 import config
 import power_opt.reader as reader
-from solution import (SolutionData, compute_metrics, extract_all,
-                      write_result_json, write_timeseries_csv)
+from solution import Solution, write_result_json
 from model.units import thermal as TH
 from model.units import gas as GA
 from model.units import nuclear as NU
@@ -29,12 +30,15 @@ from model.units import pumped_storage as PS
 from model.units import electrochemical as ES
 from model.units import hydro as HY
 from model.units import friendly as FR
+from model.units import csp as CS
 from model.units.base import _wsum
 from model import context as CT
 
 # 电源建序合同（冻结）：add_vars / add_constraints / add_cost 三处共用此顺序
 UNITS = [TH.Thermal, GA.Gas, NU.Nuclear, BI.Biomass,
          PS.PumpedStorage, ES.Electrochemical, HY.Hydro, FR.Friendly]
+# 2026-10-16 光热尾插（对照 MATLAB 2.11/4.11 物理位置=全部电源之后），海南 N_csp=0
+UNITS = UNITS + [CS.Csp]
 
 
 def build(m: gp.Model, inp: reader.Inputs):
@@ -57,7 +61,7 @@ def build(m: gp.Model, inp: reader.Inputs):
     Sv = CT.add_vars(m, inp)
     reg = CT.RegisteredUnits(thermal=V[0], gas=V[1], nuclear=V[2], biomass=V[3],
                              pumped_storage=V[4], electrochemical=V[5],
-                             hydro=V[6], friendly=V[7])
+                             hydro=V[6], friendly=V[7], csp=V[8])
     for inst in insts:                   # 抽蓄借 sv.u_ps_area；其余单元忽略 sv
         inst.add_constraints(m, inp, Sv)
     CT.add_constraints(m, inp, Sv, reg, *[i.inputs for i in insts])
@@ -99,6 +103,8 @@ def add_objective(m: gp.Model, inp: reader.Inputs, insts: list, Sv: CT.SystemVar
     C_hyd_curt = costs["C_hyd_curt"]
     C_fr_degrade = costs["C_fr_degrade"]; C_fr_FOM = costs["C_fr_FOM"]
     C_fr_curt = costs["C_fr_curt"]
+    # 2026-10-16 光热（4.11，1075-1077）；海南 N_csp=0 → 三项恒 0，对拍不受影响
+    C_csp = costs["C_csp"]; C_csp_gen = costs["C_csp_gen"]; C_csp_FOM = costs["C_csp_FOM"]
 
     # ---- 4.12 需求响应（1079-1082）----
     C_DR = Delta_t * _wsum(inp.dr.ShiftCost, Sv.P_shift_in, T) \
@@ -117,10 +123,11 @@ def add_objective(m: gp.Model, inp: reader.Inputs, insts: list, Sv: CT.SystemVar
 
     consts = (C_th_FOM + C_gas_FOM + C_nuc_FOM + C_bio_FOM + C_ps + C_es_FOM
               + C_hyd + C_fr_FOM + C_windFOM + C_pvFOM
-              + inp.econ.fixedCostPeriodRatio * float(np.sum(inp.dr.DRFixedCost)))
-    m.setObjective(C_th + C_gas + C_nuc + C_bio + C_ps + C_es + C_hyd + C_fr
+              + inp.econ.fixedCostPeriodRatio * float(np.sum(inp.dr.DRFixedCost))
+              + C_csp_FOM)                   # 1303：光热 FOM 进固定常数（海南 0）
+    m.setObjective(C_th + C_gas + C_nuc + C_bio + C_ps + C_es + C_hyd + C_csp + C_fr
                    + C_DR + C_curt + C_shed + C_windFOM + C_pvFOM,
-                   gp.GRB.MINIMIZE)          # 1088-1093（C_gen 含 C_hyd/C_fr，C_curt 含四项）
+                   gp.GRB.MINIMIZE)          # 1088-1093（C_gen 含 C_hyd/C_csp/C_fr，C_curt 含四项）
 
     # ---- 成本分项（供 CostSummary/CostDetail 取值，MATLAB 1084-1093 + 1290-1312）----
     # 六大项：C_gen=C_th+C_gas+C_nuc+C_bio+C_windFOM+C_pvFOM+C_hyd+C_fr（1088，
@@ -133,7 +140,7 @@ def add_objective(m: gp.Model, inp: reader.Inputs, insts: list, Sv: CT.SystemVar
     return {
         "constants": consts,
         "C_gen": C_th + C_gas + C_nuc + C_bio + C_windFOM + C_pvFOM
-                 + C_hyd + C_fr,
+                 + C_hyd + C_csp + C_fr,
         "C_sto": C_ps + C_es,
         "C_DR": C_DR, "C_curt": C_curt, "C_shed": C_shed, "C_inter": 0.0,
         "C_th": C_th, "C_gas": C_gas, "C_nuc": C_nuc, "C_bio": C_bio,
@@ -149,20 +156,21 @@ def add_objective(m: gp.Model, inp: reader.Inputs, insts: list, Sv: CT.SystemVar
         "C_es_degrade": C_es_degrade, "C_es_FOM": C_es_FOM,
         "C_fr_degrade": C_fr_degrade, "C_fr_FOM": C_fr_FOM,
         "C_hyd_curt": C_hyd_curt, "C_CO2": C_CO2, "C_pollution": C_pollution,
+        "C_csp": C_csp, "C_csp_gen": C_csp_gen, "C_csp_FOM": C_csp_FOM,  # 光热 4.11（海南 0）
         "C_wind_curt": inp.econ.c_wind_curt * Delta_t * Sv.P_wind_curt.sum(),
         "C_pv_curt": inp.econ.c_pv_curt * Delta_t * Sv.P_pv_curt.sum(),
         "C_fr_curt": C_fr_curt,
     }
 
 
-def solve(inp: reader.Inputs):
-    """组装 + 求解 + 取值；返回纯数据 SolutionData，不做前端口径组装。
+def solve(inp: reader.Inputs) -> Solution:
+    """组装 + 求解 + 取值；返回 Solution（纯数据），不做前端口径组装。
 
     Args:
         inp (Inputs): 系统公共输入。
 
     Returns:
-        SolutionData: 求解结果（无可行解时抛 RuntimeError）。
+        Solution: 求解结果（无可行解时抛 RuntimeError）。
     """
     m = gp.Model("coal_gas_nuc_bio_sto_hyd_fr_T%d" % inp.time.T)
     insts, V, Sv = build(m, inp)
@@ -198,8 +206,8 @@ def solve(inp: reader.Inputs):
         gap = m.getAttr("MIPGap")
         print("目标函数值: %.6f 元（常数部分 %.6f，MIPGap %.4f%%，耗时 %.1fs）"
               % (m.ObjVal, cost_exprs["constants"], 100 * gap, m.Runtime))
-        solution = extract_all(m, inp, *[i.inputs for i in insts], *V, Sv, cost_exprs)
-        write_timeseries_csv(inp, solution)
+        solution = Solution(m, inp, insts, Sv, cost_exprs)
+        solution.to_timeseries_csv()
         return solution
     raise RuntimeError(f"求解无可行解（{names.get(m.Status, m.Status)}），"
                        f"日志: {config.RESULT_DIR / ('gurobi_py_T%d.log' % inp.time.T)}")
@@ -211,15 +219,17 @@ if __name__ == "__main__":
     inp = reader.load_inputs()
     solution = solve(inp)
     if solution.four_items["objective"]["value"] is not None:
-        metrics = compute_metrics(inp, solution)
-        write_result_json(inp, solution, config, metrics)
+        from analysis_export import AnalysisExport
+        ae = AnalysisExport(inp, solution)
+        metrics = ae.metrics()
+        write_result_json(inp, solution, metrics)
         import plot as PL
         PL.plt.rcParams["font.family"] = ["Microsoft YaHei"]
         PL.plt.rcParams["axes.unicode_minus"] = False
-        PL.plot_operation(inp, solution, save_png=True)
-        PL.write_chart_csv(inp, solution)
-        import analysis_export as AE
-        AE.export_analysis(inp, solution, metrics)
+        plot = PL.Plot(inp, solution)
+        plot.operation_png(save_png=True)
+        plot.chart_csv()
+        ae.export(metrics)
     print("---- 本次配置 ----")
     print("时段数 T=%d  起始 %s  步长 %g h  水文情景 %s"
           % (config.T, config.START_TIME, config.DELTA_T, config.HYDROLOGY_SCENARIO))

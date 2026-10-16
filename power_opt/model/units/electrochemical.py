@@ -7,8 +7,8 @@
 电化学储能单元：一个类 Electrochemical 自包含四步生命周期
 （load → add_vars → add_constraints → add_cost）。
 读取的表：分区机组信息表[电化学储能]（AreaID 分区列，非 SUBSTR）。
-与抽蓄的差异：约束 3.5 带 if N_es>0 守卫（坑 1 镜像，守卫逐行照抄不增不删）；
-SOC 递推含自放电 (1-loss)；成本有 degrade 变动项（吞吐量单价，公式含除法）。
+与抽蓄的差异：约束 3.5 带 if N_es>0 ；
+SOC 递推含自放电 (1-loss)；成本有 degrade 变动项。
 """
 
 from __future__ import annotations
@@ -72,6 +72,23 @@ class Electrochemical:
                   "SOC_INITIAL", "ETA_CHARGE", "ETA_DISCHARGE", "SELF_DISCHARGE",
                   "POWER_COST", "ENERGY_COST", "REPLACE_FACTOR", "MAX_CYCLES",
                   "FOM_COST_PERIOD", "FOM_ENERGY_PERIOD", "NAME"]
+        """
+        AreaID：分区编号（分区表主键）
+        CAP：额定容量（充/放功率上限）
+        ENERGY_MWH：最大等效储能容量
+        SOC_MIN：最小SOC，0~1
+        SOC_MAX：最大SOC，0~1
+        SOC_INITIAL：初始SOC，0~1
+        ETA_CHARGE：充电效率，0~1
+        ETA_DISCHARGE：放电效率，0~1
+        SELF_DISCHARGE：每小时自放电率，1/h
+        POWER_COST：单位功率投资成本，元/MW
+        ENERGY_COST：单位能量投资成本，元/MWh
+        REPLACE_FACTOR：替换系数，无量纲
+        MAX_CYCLES：最大满循环次数，次
+        FOM_COST_PERIOD：年度功率运维成本
+        FOM_ENERGY_PERIOD：年度能量运维成本
+        """
         esData = _read(config.UNIT_FILE, "电化学储能", req_es)
         N_es = len(esData)
         zone_es = [_zstr(v) for v in esData["AreaID"]]
@@ -122,12 +139,12 @@ class Electrochemical:
         """
         es = self.inputs
         N, T = es.N_es, self._T
-        P_es_charge    = m.addMVar((N, T), lb=-INF, name="P_es_charge")     # 614
-        P_es_discharge = m.addMVar((N, T), lb=-INF, name="P_es_discharge")  # 615
-        u_es_ch  = m.addMVar((N, T), vtype=gp.GRB.BINARY, name="u_es_ch")   # 616
-        u_es_dis = m.addMVar((N, T), vtype=gp.GRB.BINARY, name="u_es_dis")  # 617
-        E_es     = m.addMVar((N, T + 1), lb=-INF, name="E_es")              # 618
-        R_es_hot = m.addMVar((N, T), lb=-INF, name="R_es_hot")              # 619
+        P_es_charge    = m.addMVar((N, T), lb=-INF, name="P_es_charge")
+        P_es_discharge = m.addMVar((N, T), lb=-INF, name="P_es_discharge")
+        u_es_ch  = m.addMVar((N, T), vtype=gp.GRB.BINARY, name="u_es_ch")
+        u_es_dis = m.addMVar((N, T), vtype=gp.GRB.BINARY, name="u_es_dis")
+        E_es     = m.addMVar((N, T + 1), lb=-INF, name="E_es")
+        R_es_hot = m.addMVar((N, T), lb=-INF, name="R_es_hot")
         self.vars = ESVars(P_es_charge=P_es_charge, P_es_discharge=P_es_discharge,
                            u_es_ch=u_es_ch, u_es_dis=u_es_dis, E_es=E_es, R_es_hot=R_es_hot)
         return self.vars
@@ -156,38 +173,38 @@ class Electrochemical:
         Pmax = np.repeat(es.P_es_max[:, None], T, axis=1)
 
         # ---- MATLAB 820：0 <= P_ch、P_ch <= Pmax·u_ch ----
-        m.addConstr(0 <= Pch, name="Pch_lb")
-        m.addConstr(Pch <= Pmax * uch, name="Pch_ub")
+        m.addConstr(0 <= Pch, name="Pch_lb") # Math: P_{c,i,t} \ge 0（充电功率非负约束）
+        m.addConstr(Pch <= Pmax * uch, name="Pch_ub") # Math: P_{c,i,t} \le P_{es,i}^{max} u_{ch,i,t}（充电状态功率上限约束）
         # ---- MATLAB 821：0 <= P_dis、P_dis <= Pmax·u_dis ----
-        m.addConstr(0 <= Pdis, name="Pdis_lb")
-        m.addConstr(Pdis <= Pmax * udis, name="Pdis_ub")
+        m.addConstr(0 <= Pdis, name="Pdis_lb") # Math: P_{d,i,t} \ge 0（放电功率非负约束）
+        m.addConstr(Pdis <= Pmax * udis, name="Pdis_ub") # Math: P_{d,i,t} \le P_{es,i}^{max} u_{dis,i,t}（放电状态功率上限约束）
         # ---- MATLAB 822：充放互斥 ----
-        m.addConstr(uch + udis <= 1, name="mutex")
+        m.addConstr(uch + udis <= 1, name="mutex") # Math: u_{ch,i,t} + u_{dis,i,t} \le 1（同一时段不能同时充电和放电互斥约束）
         # ---- MATLAB 823：SOC 递推（含自放电 1-loss；充 +、放 −）----
         loss = np.repeat(es.loss_es[:, None], T, axis=1)
         eta_ch = np.repeat(es.eta_es_ch[:, None], T, axis=1)
         inv_eta_dis = np.repeat((1.0 / es.eta_es_dis)[:, None], T, axis=1)
         m.addConstr(E[:, 1:] == (1 - loss) * E[:, :-1]
                     + eta_ch * Pch * Delta_t
-                    - inv_eta_dis * Pdis * Delta_t, name="soc")
+                    - inv_eta_dis * Pdis * Delta_t, name="soc") # Math: E_{i,t} = (1 - \sigma_{i}) E_{i,t-1} + \eta_{ch,i} P_{c,i,t} \Delta t - P_{d,i,t} \Delta t / \eta_{dis,i}（储能能量递推平衡约束）
         # ---- MATLAB 825：E 界（E_es(:) 展开 N×(T+1) 行）----
         Emin = np.repeat(es.E_es_min[:, None], T + 1, axis=1)
         Eup = np.repeat(es.E_es_upper[:, None], T + 1, axis=1)
-        m.addConstr(Emin <= E, name="E_lb")
-        m.addConstr(E <= Eup, name="E_ub")
+        m.addConstr(Emin <= E, name="E_lb") # Math: E_{i,t} \ge SOC_{i}^{min} E_{i}^{N}（储能能量下限约束）
+        m.addConstr(E <= Eup, name="E_ub") # Math: E_{i,t} \le SOC_{i}^{max} E_{i}^{N}（储能能量上限约束）
         # ---- MATLAB 826：首末能量相等 ----
         E0 = es.E_es_initial[:, None]
-        m.addConstr(E[:, 0:1] == E0, name="E_init")
-        m.addConstr(E[:, T:T + 1] == E0, name="E_end")
+        m.addConstr(E[:, 0:1] == E0, name="E_init") # Math: E_{i,0} = E_{i}^{ini}（周期能量初值约束）
+        m.addConstr(E[:, T:T + 1] == E0, name="E_end") # Math: E_{i,T} = E_{i}^{ini}（周期末能量回归初值约束）
         # ---- MATLAB 827/828：热备用受放电余量限制（上界 Pmax·(1-u_ch)）----
-        m.addConstr(0 <= R, name="R_lb")
-        m.addConstr(Pdis + R <= Pmax * (1 - uch), name="R_ub")
+        m.addConstr(0 <= R, name="R_lb") # Math: R_{es,i,t} \ge 0（热备用容量非负约束）
+        m.addConstr(Pdis + R <= Pmax * (1 - uch), name="R_ub") # Math: P_{d,i,t} + R_{es,i,t} \le P_{es,i}^{max} (1 - u_{ch,i,t})（放电功率与热备用容量及充放互斥上限约束）
         # ---- MATLAB 829：备用能量限制 rd·R <= eta_dis·(E(2:T+1)-Emin) ----
         rd = inp.prov.reserveDuration[inp.areas.areaProvince[es.area_es]]        # 省级参数领行
         rdT = np.repeat(np.asarray(rd, float)[:, None], T, axis=1)
         eta_dis = np.repeat(es.eta_es_dis[:, None], T, axis=1)
         EminT = np.repeat(es.E_es_min[:, None], T, axis=1)
-        m.addConstr(rdT * R <= eta_dis * (E[:, 1:] - EminT), name="R_energy")
+        m.addConstr(rdT * R <= eta_dis * (E[:, 1:] - EminT), name="R_energy") # Math: r_{d} R_{es,i,t} \le \eta_{dis,i} (E_{i,t} - E_{i}^{min})（热备用容量可用能量限制约束）
 
     def add_cost(self, dt: float, econ) -> dict:
         """镜像 MATLAB 4.5 节（1046-1049）汇总电储能成本表达式。
@@ -204,10 +221,10 @@ class Electrochemical:
         T = self.vars.E_es.shape[1] - 1
         var, es = self.vars, self.inputs
         C_es_degrade = dt * (_wsum(es.c_es_degrade, var.P_es_charge, T)
-                             + _wsum(es.c_es_degrade, var.P_es_discharge, T))   # 1047
+                             + _wsum(es.c_es_degrade, var.P_es_discharge, T)) # Math: C_{es,deg} = \Delta t \sum_{t=1}^{T} \sum_{i} c_{es,i}^{deg} (P_{c,i,t} + P_{d,i,t})（电储能总寿命损耗成本）
         C_es_FOM = float(np.sum(es.c_es_FOM * es.P_es_max
-                                + es.c_es_energy_FOM * es.E_es_max))          # 1048 常数
-        C_es = C_es_degrade + C_es_FOM                                         # 1049
+                                + es.c_es_energy_FOM * es.E_es_max)) # Math: C_{es,FOM} = \sum_{i} (c_{es,i}^{FOM} P_{es,i}^{max} + c_{es,i}^{E,FOM} E_{es,i}^{max})（电储能固定运行维护成本）
+        C_es = C_es_degrade + C_es_FOM # Math: C_{es} = C_{es,deg} + C_{es,FOM}（电储能总运行成本）
         return {"C_es": C_es, "C_es_degrade": C_es_degrade, "C_es_FOM": C_es_FOM}
 
 

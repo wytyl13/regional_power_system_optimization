@@ -14,6 +14,10 @@ camelCase JSON 输出形状不变（service/assemble.py 再导出，app.py 契�
 已知差异（如实记录）：.fig 是 MATLAB 专有格式不生成；AnalysisRun 的 datetime/
 string 字段与 table 类型在 scipy 写出的 .mat 中退化为 char 数组 / struct array
 （MATLAB 端 load 后访问语法 CostSummary(k).Category 与 table.Cost_Yuan(k) 接近）。
+
+v2 重构（2026-10-16 裁决）：对外入口收口为 AnalysisExport 类（metrics/build_analysis/
+build_views/export）；compute_metrics 自 solution.py 并入（分析口径，非取值口径）；
+views 不再含 positionChart（前端独有，移 service/position_chart.py 组装）。
 """
 from __future__ import annotations
 
@@ -24,6 +28,96 @@ import numpy as np
 
 import config
 import plot as PL
+
+
+def _aggregation(total_rows, areas):
+    """机组 → 分区归属矩阵 (Narea,n)：第 i 台机组在第 area_i 行置 1。"""
+    matrix = np.zeros((total_rows, len(areas)))
+    matrix[areas, np.arange(len(areas))] = 1
+    return matrix
+
+
+def _compute_metrics(inp, solution) -> dict:
+    """组装期派生指标（MATLAB 1177-1190 自检 + report 专用量）。
+    原在 solution.py，v2 并入本文件（分析口径）；write_result_json 与五张分析表从这里取数。"""
+    V = solution.values
+    U = solution.units
+    F = solution.inputs_fields
+    Delta_t = inp.time.Delta_t
+
+    A_th = _aggregation(inp.areas.Narea, U["thermal"]["area"])
+    A_gas = _aggregation(inp.areas.Narea, U["gas"]["area"])
+    A_hyd_ror = _aggregation(inp.areas.Narea, U["hydro_ror"]["area"])
+    A_hyd_res = _aggregation(inp.areas.Narea, U["hydro_reservoir"]["area"])
+    A_ps = _aggregation(inp.areas.Narea, U["pumped_storage"]["area"])
+    A_es = _aggregation(inp.areas.Narea, U["electrochemical"]["area"])
+    A_fr = _aggregation(inp.areas.Narea, U["friendly"]["area"])
+    A_line = np.zeros((inp.areas.Narea, inp.lines.N_line))
+    A_line[inp.lines.line_from, np.arange(inp.lines.N_line)] = -1
+    A_line[inp.lines.line_to, np.arange(inp.lines.N_line)] = 1
+
+    # 平衡残差 = 发电 + 储能净出力 + 净受入 + 失负荷 − 响应后负荷（MATLAB 1178）
+    P_G = (A_th @ V["P_th"] + A_gas @ V["P_gas"]
+           + _aggregation(inp.areas.Narea, U["nuclear"]["area"]) @ V["P_nuc"]
+           + _aggregation(inp.areas.Narea, U["biomass"]["area"]) @ V["P_bio"]
+           + V["P_wind"] + V["P_pv"]
+           + A_hyd_ror @ V["P_hyd_ror"] + A_hyd_res @ V["P_hyd_res"]
+           + A_fr @ (V["P_fr_wind_out"] + V["P_fr_pv_out"] + V["P_fr_discharge"]))
+    P_sto = (A_ps @ V["P_ps_gen"] - A_ps @ V["P_ps_pump"]
+             + A_es @ V["P_es_discharge"] - A_es @ V["P_es_charge"])
+    P_tr = A_line @ V["P_line"]
+    P_D = (inp.profiles.P_load - V["P_shift_out"] + V["P_shift_in"] - V["P_cut"])
+    resid = P_G + P_sto + P_tr + V["P_shed"] - P_D
+    print("功率平衡残差 max: %.3g MW（MATLAB 1178 行同款自检，应≈0）"
+          % np.abs(resid).max())
+
+    # 新能源利用率（省级聚合含友好站，MATLAB 1181-1186）
+    A_prov = np.zeros((inp.areas.Nprovince, inp.areas.Narea))
+    A_prov[inp.areas.areaProvince, np.arange(inp.areas.Narea)] = 1
+    RE_avail = A_prov @ (inp.profiles.P_wind_available + inp.profiles.P_pv_available
+                         + A_fr @ (U["friendly"]["wind_available"]
+                                   + U["friendly"]["pv_available"]))
+    RE_curt = A_prov @ (V["P_wind_curt"] + V["P_pv_curt"]
+                        + A_fr @ (V["P_fr_wind_curt"] + V["P_fr_pv_curt"]))
+    available_energy = RE_avail.sum(axis=1) * Delta_t
+    curtailed_energy = RE_curt.sum(axis=1) * Delta_t
+    utilization = np.full(inp.areas.Nprovince, np.nan)
+    has_re = available_energy > 0
+    utilization[has_re] = 1 - curtailed_energy[has_re] / available_energy[has_re]
+    energy_not_served = float(V["P_shed"].sum() * Delta_t)       # 1187
+    loss_of_load_hours = float((V["P_shed"] > 1e-4).any(axis=0).sum()) * Delta_t  # 1188
+    max_load_shortfall = float(V["P_shed"].sum(axis=0).max())    # 1189
+    print("新能源利用率：%.2f%%，弃风光电量：%.3f MWh，失负荷：%.3f MWh"
+          % (100 * utilization[0], curtailed_energy.sum(), energy_not_served))
+    print("缺电小时：%.0f h，最大缺口：%.3f MW"
+          % (loss_of_load_hours, max_load_shortfall))
+
+    # 热/冷备用裕度（1002/1003 同式对自身比例约束的最小富余）
+    Rhot = A_prov @ (A_th @ V["R_th_hot"] + A_gas @ V["R_gas_hot"]
+                     + A_hyd_res @ V["R_hyd_hot"] + A_ps @ V["R_ps_hot"]
+                     + A_es @ V["R_es_hot"])
+    Rcold = A_prov @ (A_th @ V["R_th_cold"] + A_gas @ V["R_gas_cold"])
+    hot_margin = float((Rhot - np.repeat(
+        inp.prov.hotReserveRatio[:, None], inp.time.T, 1) * inp.week_peak).min())
+    cold_margin = float((Rcold - np.repeat(
+        inp.prov.coldReserveRatio[:, None], inp.time.T, 1) * inp.week_peak).min())
+
+    # CO2 总量（1001 同式）/ 储能首末能量闭合
+    co2_t = float(Delta_t * (V["CO2_th"].sum()
+                  + (np.asarray(F["CO2_gas_factor"])[:, None] * V["P_gas"]).sum()))
+    closure = float(max(np.abs(data[:, -1] - data[:, 0]).max(initial=0.0)
+                        for data in (V["E_ps"], V["E_es"], V["E_fr"])))
+    return {
+        "P_D": P_D, "Rhot": Rhot,
+        "balanceErrorMW": float(np.abs(resid).max()),
+        "renewableUtilization": utilization,
+        "curtailedEnergy": curtailed_energy,
+        "energyNotServed": energy_not_served,
+        "lossOfLoadHours": loss_of_load_hours,
+        "maxLoadShortfall": max_load_shortfall,
+        "hotMargin": hot_margin, "coldMargin": cold_margin,
+        "CO2_t": co2_t, "storageClosure": closure,
+    }
 
 
 # ---------- 八、成本构成（1290-1312）----------
@@ -42,11 +136,13 @@ def cost_analysis(solution):
                    "sharePercent": 100.0 * float(v) / total if abs(total) > 1e-8 else None}
                   for n, v in zip(six_names, six)],
     }
-    # 十项性质分解（1302-1309）；海南无光热 → C_csp 各分量为 0
+    # 十项性质分解（1302-1309）；光热 FOM 进固定、GEN_COST 进变动（1303/1305，
+    # 2026-10-16 接入；海南无光热 → C_csp 各分量为 0）
     fixed_all = (C["C_th_FOM"] + C["C_gas_FOM"] + C["C_bio_FOM"] + C["C_nuc_FOM"]
                  + C["C_hyd"] + C["C_es_FOM"] + C["C_ps"]
-                 + C["C_windFOM"] + C["C_pvFOM"] + C["C_fr_FOM"])
-    variable_all = C["C_th_fuel"] + C["C_gas_gen"] + C["C_bio_gen"] + C["C_nuc_gen"]
+                 + C["C_windFOM"] + C["C_pvFOM"] + C["C_fr_FOM"] + C["C_csp_FOM"])
+    variable_all = (C["C_th_fuel"] + C["C_gas_gen"] + C["C_bio_gen"] + C["C_nuc_gen"]
+                    + C["C_csp_gen"])
     ten_names = ["燃料及变动发电", "启动与停机", "固定运维", "碳排放", "大气污染物",
                  "电池老化", "需求响应", "弃电惩罚", "失负荷惩罚", "省间互济"]
     ten = [variable_all,
@@ -143,7 +239,7 @@ def device_analysis(inp, solution):
         ("生物质", V["P_bio"].sum(axis=0)), ("核电", V["P_nuc"].sum(axis=0)),
         ("常规水电", hydro.sum(axis=0)), ("普通风电", V["P_wind"].sum(axis=0)),
         ("普通光伏", V["P_pv"].sum(axis=0)),
-        ("光热", np.zeros(inp.time.T)),          # 未建模 → 0
+        ("光热", V["P_csp_unit"].sum(axis=0)),   # 2026-10-16 接入（N=0 → 0 行）
         ("新能源友好站净上网", fr_net.sum(axis=0)),
         ("抽蓄发电", V["P_ps_gen"].sum(axis=0)),
         ("独立储能放电", V["P_es_discharge"].sum(axis=0)),
@@ -195,13 +291,16 @@ def build_analysis(inp, solution):
 # ---------- 前端 views 块（service 注入 solution.json 用；只算数不出图）----------
 # 服务路径不执行绘图（plot_operation/export_analysis 只在本地 __main__ 跑），
 # 前端自绘所需的视图数据在此组装，与 PNG/CSV 同一口径。
-# 规范（2026-10-12 与用户定稿）：9 个 tab 一律 {title, note?, panels[]}；
+# 规范（2026-10-12 与用户定稿）：tab 一律 {title, note?, panels[]}；
 # panel type 只有 4 种 stacked/line/bar/heatmap；标签直接中文进 JSON（无前端映射表）；
 # table 不进 views（用户裁决：渲染层只出 PNG 有的东西）。
 # time 轴不在 views 里：前端复用 result.time。
+# v2（2026-10-16）：positionChart（27 列老 Excel 口径）是前端独有，不属算法口径，
+# 自本块摘除，移 service/position_chart.py 组装（service 注入 views["positionChart"]）。
 
 def build_views(inp, solution):
-    """solution.json 的 result.views 块（前端唯一渲染入口，9 tab 自包含）。
+    """solution.json 的 result.views 块（前端唯一渲染入口，8 tab 自包含；
+    positionChart 由 service 侧另行注入）。
     各 panel 形状（全 panel 可带 xLabel/yLabel，轴文字原文抄 PNG）：
       stacked  {series:{名:[T]}, lines?:{名:[T]}}      堆叠柱；lines 不参与堆叠
       line     {series:{名:[T]}, step?:true, hlines?:[{name,value}]}
@@ -223,55 +322,7 @@ def build_views(inp, solution):
     import plot as PL
     views = {}
 
-    # ==== tab1：工作位置图（27 列老列序；口径同 solution.write_result_json 的
-    # position_chart，stacked 只堆 14 个发电列，其余 13 列为参照线）====
-    th_min = (np.asarray(U["thermal"]["minimum"])[:, None] * V["u_th"]).sum(axis=0)
-    gas_min = (np.asarray(U["gas"]["minimum"])[:, None] * V["u_gas"]).sum(axis=0)
-    bio_min = (np.asarray(U["biomass"]["minimum"])[:, None]
-               * (1 - np.asarray(U["biomass"]["maintenance"]))).sum(axis=0)
-    P_D_row = P_D.sum(axis=0)
-    ZT = np.zeros(T)
-    pc = [
-        ("核电", V["P_nuc"].sum(axis=0), True),
-        ("煤电最小技术出力", th_min, True),
-        ("生物质最小技术出力", bio_min, True),
-        ("气电最小技术出力", gas_min, True),
-        ("水电强迫", V["P_hyd_ror"].sum(axis=0), True),
-        ("气电可调", V["P_gas"].sum(axis=0) - gas_min, True),
-        ("煤电可调", V["P_th"].sum(axis=0) - th_min, True),
-        ("生物质可调", V["P_bio"].sum(axis=0) - bio_min, True),
-        ("启停调峰气电", ZT, True), ("水电可调", V["P_hyd_res"].sum(axis=0), True),
-        ("风电发电", V["P_wind"].sum(axis=0) + V["P_fr_wind_out"].sum(axis=0), True),
-        ("光伏发电", V["P_pv"].sum(axis=0) + V["P_fr_pv_out"].sum(axis=0), True),
-        ("电量不足", V["P_shed"].sum(axis=0), True),
-        ("抽水蓄能", (V["P_ps_gen"] - V["P_ps_pump"]).sum(axis=0), True),
-        ("新型储能", (V["P_es_discharge"] - V["P_es_charge"]
-                      + V["P_fr_discharge"]).sum(axis=0), True),
-        ("发电曲线", P_D_row + V["P_ps_pump"].sum(axis=0)
-                     + V["P_es_charge"].sum(axis=0), False),
-        ("修正后负荷曲线", P_D_row, False),
-        ("需求响应", inp.profiles.P_load.sum(axis=0) - P_D_row, False),
-        ("送电曲线", ZT, False), ("本地负荷", inp.profiles.P_load.sum(axis=0), False),
-        ("水火备用", V["R_th_hot"].sum(axis=0) + V["R_hyd_hot"].sum(axis=0), False),
-        ("旋转备用", ZT, False),   # 省级备用列老版常量近似，数值见 report.hotReserveMarginMW
-        ("核电压出力", ZT, False), ("弃水", ZT, False), ("调峰不足", ZT, False),
-        ("弃风", V["P_wind_curt"].sum(axis=0), False),
-        ("弃光", V["P_pv_curt"].sum(axis=0), False),
-    ]
-    # 自检同 write_result_json：14 列堆叠合计 ≈ 修正后负荷
-    assert np.abs(sum(p for _, p, s in pc if s) - P_D_row).max() < 1e-3, \
-        "工作位置图堆叠合计≠修正后负荷：有列漏算"
-    views["positionChart"] = {
-        "title": "工作位置图",
-        "panels": [{
-            "type": "stacked", "title": "工作位置图",
-            "series": {n: ts(p) for n, p, s in pc if s},
-            "lines": {n: ts(p) for n, p, s in pc if not s},
-            "xLabel": "时间（月/日 时:分）", "yLabel": "功率 / MW",
-        }],
-    }
-
-    # ==== tab2：设备运行（00 图口径 = plot.write_chart_csv；21 列 + 2 负荷线）====
+    # ==== tab1：设备运行（00 图口径 = plot.write_chart_csv；21 列 + 2 负荷线）====
     device = PL.build_device_data(inp, solution)
     assert np.abs(device.sum(axis=2) - P_D).max() < 1e-3, \
         "21 列合计≠响应后负荷：有设备列漏算"
@@ -868,3 +919,36 @@ def export_analysis(inp, solution, metrics, analysis=None, result_root=None) -> 
     write_mat(inp, solution, metrics, analysis, out_dir / "海南分析结果.mat")
     write_summary_txt(inp, solution, metrics, analysis, out_dir / "分析摘要.txt")
     print("分析结果目录: %s" % out_dir)
+
+
+# ---------- 对外入口类（v2，2026-10-16）：四层架构之分析导出层 ----------
+
+class AnalysisExport:
+    """§八~十二分析导出入口：metrics（原 solution.compute_metrics 并入）/
+    五表 / views（减 positionChart）/ 四件套落盘（01~07 PNG + .mat + 摘要.txt）。
+    只读 Solution（下游零 gurobipy 依赖）；服务层经 run.py 转发使用本类。"""
+
+    def __init__(self, inp, solution):
+        self.inp = inp
+        self.solution = solution
+        self._metrics = None
+
+    def metrics(self) -> dict:
+        """组装期派生指标（残差/利用率/失负荷/备用裕度/CO₂/储能闭合）。"""
+        if self._metrics is None:
+            self._metrics = _compute_metrics(self.inp, self.solution)
+        return self._metrics
+
+    def build_analysis(self) -> dict:
+        """五表总装（camelCase，口径对齐 MATLAB 八~十一节）。"""
+        return build_analysis(self.inp, self.solution)
+
+    def build_views(self) -> dict:
+        """前端 views 块（8 tab；positionChart 由 service 侧组装注入）。"""
+        return build_views(self.inp, self.solution)
+
+    def export(self, metrics: dict | None = None, result_root=None) -> None:
+        """分析结果四件套落盘（00 PNG + 01~07 PNG + .mat + 摘要.txt）。"""
+        export_analysis(self.inp, self.solution,
+                        metrics if metrics is not None else self.metrics(),
+                        result_root=result_root)

@@ -34,6 +34,7 @@ class RegisteredUnits:
     electrochemical: object = None  # electrochemical.ESVars
     hydro: object = None            # hydro.HydVars（水电轮接入）
     friendly: object = None         # friendly.FrVars（友好电站，海南 v2 接入）
+    csp: object = None              # csp.CspVars（光热，2026-10-16 接入，对照 MATLAB 2.11/981）
 
 
 @dataclass
@@ -91,7 +92,8 @@ def _scatter(edges: int, rows: np.ndarray, T: int):
 
 
 def add_constraints(m: gp.Model, inp: Inputs, sysv: SystemVars,
-                    units: RegisteredUnits, coal, gas, nuc, bio, ps, es, hyd, fr) -> None:
+                    units: RegisteredUnits, coal, gas, nuc, bio, ps, es, hyd, fr,
+                    csp) -> None:
     Narea, T, Np = inp.areas.Narea, inp.time.T, inp.areas.Nprovince
     INF = gp.GRB.INFINITY
     # ---- 3.7/3.8：风、光（可用=出力+弃；煤电单测中可用=0 → 全被钉成 0）----
@@ -148,11 +150,13 @@ def add_constraints(m: gp.Model, inp: Inputs, sysv: SystemVars,
     A_hyd_ror = _area_agg(hyd.area_hyd_ror, hyd.N_hyd_ror, Narea)     # MATLAB 408
     A_hyd_res = _area_agg(hyd.area_hyd_res, hyd.N_hyd_res, Narea)     # 409
     A_fr = _area_agg(fr.area_fr, fr.N_fr, Narea)                      # MATLAB 480
+    A_csp = _area_agg(csp.area_csp, csp.N_csp, Narea)                 # MATLAB 457
     P_G = (_amul(A_th, units.thermal.P_th) + _amul(A_gas, units.gas.P_gas)
            + _amul(A_nuc, units.nuclear.P_nuc) + _amul(A_bio, units.biomass.P_bio)
            + _amul(A_hyd_ror, units.hydro.P_hyd_ror)
            + _amul(A_hyd_res, units.hydro.P_hyd_res)                   # 818/976（P_hyd 展开进 P_G）
            + sysv.P_wind + sysv.P_pv
+           + _amul(A_csp, units.csp.P_csp_unit)                       # 981（P_csp 展开进 P_G，海南 N=0 → 0）
            + _amul(A_fr, units.friendly.P_fr_wind_out
                    + units.friendly.P_fr_pv_out
                    + units.friendly.P_fr_discharge))                   # 897/981（P_fr 展开进 P_G）

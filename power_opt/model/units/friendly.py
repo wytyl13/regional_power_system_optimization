@@ -77,6 +77,27 @@ class Friendly:
                   "SELF_DISCHARGE", "POWER_COST", "ENERGY_COST", "REPLACE_FACTOR",
                   "MAX_CYCLES", "FOM_COST_PERIOD", "FOM_ENERGY_PERIOD",
                   "WIND_FOM_PERIOD", "PV_FOM_PERIOD", "NAME"]
+        """
+        AreaID：分区编号（分区表主键）
+        WIND_CAP：站内风电容量
+        PV_CAP：站内光伏容量
+        ES_POWER：站内储能功率
+        ENERGY_MWH：最大等效储能容量
+        SOC_MIN：最小SOC，0~1
+        SOC_MAX：最大SOC，0~1
+        SOC_INITIAL：初始SOC，0~1
+        ETA_CHARGE：充电效率，0~1
+        ETA_DISCHARGE：放电效率，0~1
+        SELF_DISCHARGE：每小时自放电率，1/h
+        POWER_COST：单位功率投资成本，元/MW
+        ENERGY_COST：单位能量投资成本，元/MWh
+        REPLACE_FACTOR：替换系数，无量纲
+        MAX_CYCLES：最大满循环次数，次
+        FOM_COST_PERIOD：年度功率运维成本
+        FOM_ENERGY_PERIOD：年度能量运维成本
+        WIND_FOM_PERIOD：本周期站内风电运维，元/MW
+        PV_FOM_PERIOD：本周期站内光伏运维，元/MW
+        """
         frData = _read(config.UNIT_FILE, "新能源友好电站", req_fr)
         N_fr = len(frData)
         zone_fr = [_zstr(v) for v in frData["AreaID"]]
@@ -145,17 +166,17 @@ class Friendly:
         """
         fr = self.inputs
         N, T = fr.N_fr, self._T
-        P_fr_wind_out  = m.addMVar((N, T), lb=-INF, name="P_fr_wind_out")    # 649
-        P_fr_wind_ch   = m.addMVar((N, T), lb=-INF, name="P_fr_wind_ch")     # 650
-        P_fr_wind_curt = m.addMVar((N, T), lb=-INF, name="P_fr_wind_curt")   # 651
-        P_fr_pv_out    = m.addMVar((N, T), lb=-INF, name="P_fr_pv_out")      # 652
-        P_fr_pv_ch     = m.addMVar((N, T), lb=-INF, name="P_fr_pv_ch")       # 653
-        P_fr_pv_curt   = m.addMVar((N, T), lb=-INF, name="P_fr_pv_curt")     # 654
-        P_fr_charge    = m.addMVar((N, T), lb=-INF, name="P_fr_charge")      # 655
-        P_fr_discharge = m.addMVar((N, T), lb=-INF, name="P_fr_discharge")   # 656
-        u_fr_ch  = m.addMVar((N, T), vtype=gp.GRB.BINARY, name="u_fr_ch")    # 657
-        u_fr_dis = m.addMVar((N, T), vtype=gp.GRB.BINARY, name="u_fr_dis")   # 658
-        E_fr     = m.addMVar((N, T + 1), lb=-INF, name="E_fr")               # 659
+        P_fr_wind_out  = m.addMVar((N, T), lb=-INF, name="P_fr_wind_out")
+        P_fr_wind_ch   = m.addMVar((N, T), lb=-INF, name="P_fr_wind_ch")
+        P_fr_wind_curt = m.addMVar((N, T), lb=-INF, name="P_fr_wind_curt")
+        P_fr_pv_out    = m.addMVar((N, T), lb=-INF, name="P_fr_pv_out")
+        P_fr_pv_ch     = m.addMVar((N, T), lb=-INF, name="P_fr_pv_ch")
+        P_fr_pv_curt   = m.addMVar((N, T), lb=-INF, name="P_fr_pv_curt")
+        P_fr_charge    = m.addMVar((N, T), lb=-INF, name="P_fr_charge")
+        P_fr_discharge = m.addMVar((N, T), lb=-INF, name="P_fr_discharge")
+        u_fr_ch  = m.addMVar((N, T), vtype=gp.GRB.BINARY, name="u_fr_ch")
+        u_fr_dis = m.addMVar((N, T), vtype=gp.GRB.BINARY, name="u_fr_dis")
+        E_fr     = m.addMVar((N, T + 1), lb=-INF, name="E_fr")
         self.vars = FrVars(P_fr_wind_out=P_fr_wind_out, P_fr_wind_ch=P_fr_wind_ch,
                            P_fr_wind_curt=P_fr_wind_curt, P_fr_pv_out=P_fr_pv_out,
                            P_fr_pv_ch=P_fr_pv_ch, P_fr_pv_curt=P_fr_pv_curt,
@@ -187,42 +208,42 @@ class Friendly:
         E = var.E_fr
 
         # ---- MATLAB 881-882：风/光三变量非负 ----
-        m.addConstr(Pw_out >= 0, name="fr_wout_lb")
-        m.addConstr(Pw_ch >= 0, name="fr_wch_lb")
-        m.addConstr(Pw_curt >= 0, name="fr_wcurt_lb")
-        m.addConstr(Pv_out >= 0, name="fr_pout_lb")
-        m.addConstr(Pv_ch >= 0, name="fr_pch_lb")
-        m.addConstr(Pv_curt >= 0, name="fr_pcurt_lb")
+        m.addConstr(Pw_out >= 0, name="fr_wout_lb") # Math: P_{wind,i,t}^{out} \ge 0（风电直送功率非负约束）
+        m.addConstr(Pw_ch >= 0, name="fr_wch_lb") # Math: P_{wind,i,t}^{ch} \ge 0（风电站内充电功率非负约束）
+        m.addConstr(Pw_curt >= 0, name="fr_wcurt_lb") # Math: P_{wind,i,t}^{curt} \ge 0（风电弃风功率非负约束）
+        m.addConstr(Pv_out >= 0, name="fr_pout_lb") # Math: P_{pv,i,t}^{out} \ge 0（光伏直送功率非负约束）
+        m.addConstr(Pv_ch >= 0, name="fr_pch_lb") # Math: P_{pv,i,t}^{ch} \ge 0（光伏站内充电功率非负约束）
+        m.addConstr(Pv_curt >= 0, name="fr_pcurt_lb") # Math: P_{pv,i,t}^{curt} \ge 0（光伏弃光功率非负约束）
         # ---- MATLAB 883-884：可用 = 直送 + 站内充 + 弃 ----
-        m.addConstr(Pw_out + Pw_ch + Pw_curt == fr.P_fr_wind_available, name="fr_w_bal")
-        m.addConstr(Pv_out + Pv_ch + Pv_curt == fr.P_fr_pv_available, name="fr_p_bal")
+        m.addConstr(Pw_out + Pw_ch + Pw_curt == fr.P_fr_wind_available, name="fr_w_bal") # Math: P_{wind,i,t}^{out} + P_{wind,i,t}^{ch} + P_{wind,i,t}^{curt} = P_{wind,i,t}^{avail}（风电可用功率三分平衡约束）
+        m.addConstr(Pv_out + Pv_ch + Pv_curt == fr.P_fr_pv_available, name="fr_p_bal") # Math: P_{pv,i,t}^{out} + P_{pv,i,t}^{ch} + P_{pv,i,t}^{curt} = P_{pv,i,t}^{avail}（光伏可用功率三分平衡约束）
         # ---- MATLAB 886：储能仅由本站风光充电，不从电网吸收功率 ----
-        m.addConstr(Pch == Pw_ch + Pv_ch, name="fr_ch_def")
+        m.addConstr(Pch == Pw_ch + Pv_ch, name="fr_ch_def") # Math: P_{c,i,t} = P_{wind,i,t}^{ch} + P_{pv,i,t}^{ch}（储能充电功率来源定义约束）
         # ---- MATLAB 887：0 <= P_ch <= Pmax·u_ch ----
         Pmax = np.repeat(fr.P_fr_es_max[:, None], T, axis=1)
-        m.addConstr(0 <= Pch, name="fr_Pch_lb")
-        m.addConstr(Pch <= Pmax * uch, name="fr_Pch_ub")
+        m.addConstr(0 <= Pch, name="fr_Pch_lb") # Math: P_{c,i,t} \ge 0（充电功率非负约束）
+        m.addConstr(Pch <= Pmax * uch, name="fr_Pch_ub") # Math: P_{c,i,t} \le P_{fr,i}^{max} u_{ch,i,t}（充电状态功率上限约束）
         # ---- MATLAB 888：0 <= P_dis <= Pmax·u_dis ----
-        m.addConstr(0 <= Pdis, name="fr_Pdis_lb")
-        m.addConstr(Pdis <= Pmax * udis, name="fr_Pdis_ub")
+        m.addConstr(0 <= Pdis, name="fr_Pdis_lb") # Math: P_{d,i,t} \ge 0（放电功率非负约束）
+        m.addConstr(Pdis <= Pmax * udis, name="fr_Pdis_ub") # Math: P_{d,i,t} \le P_{fr,i}^{max} u_{dis,i,t}（放电状态功率上限约束）
         # ---- MATLAB 889：充放互斥 ----
-        m.addConstr(uch + udis <= 1, name="fr_mutex")
+        m.addConstr(uch + udis <= 1, name="fr_mutex") # Math: u_{ch,i,t} + u_{dis,i,t} \le 1（同一时段不能同时充电和放电互斥约束）
         # ---- MATLAB 890-892：SOC 递推（自放电 1-loss；充 η_ch、放 1/η_dis）----
         loss = np.repeat(fr.loss_fr[:, None], T, axis=1)
         eta_ch = np.repeat(fr.eta_fr_ch[:, None], T, axis=1)
         inv_eta_dis = np.repeat((1.0 / fr.eta_fr_dis)[:, None], T, axis=1)
         m.addConstr(E[:, 1:] == (1 - loss) * E[:, :-1]
                     + eta_ch * Pch * Delta_t
-                    - inv_eta_dis * Pdis * Delta_t, name="fr_soc")
+                    - inv_eta_dis * Pdis * Delta_t, name="fr_soc") # Math: E_{i,t} = (1 - \sigma_{i}) E_{i,t-1} + \eta_{ch,i} P_{c,i,t} \Delta t - P_{d,i,t} \Delta t / \eta_{dis,i}（储能能量递推平衡约束）
         # ---- MATLAB 893：E 界（E_fr(:) 展开 N×(T+1) 行）----
         Emin = np.repeat(fr.E_fr_min[:, None], T + 1, axis=1)
         Eup = np.repeat(fr.E_fr_upper[:, None], T + 1, axis=1)
-        m.addConstr(Emin <= E, name="fr_E_lb")
-        m.addConstr(E <= Eup, name="fr_E_ub")
+        m.addConstr(Emin <= E, name="fr_E_lb") # Math: E_{i,t} \ge SOC_{i}^{min} E_{i}^{N}（储能能量下限约束）
+        m.addConstr(E <= Eup, name="fr_E_ub") # Math: E_{i,t} \le SOC_{i}^{max} E_{i}^{N}（储能能量上限约束）
         # ---- MATLAB 894：首末能量相等 ----
         E0 = fr.E_fr_initial[:, None]
-        m.addConstr(E[:, 0:1] == E0, name="fr_E_init")
-        m.addConstr(E[:, T:T + 1] == E0, name="fr_E_end")
+        m.addConstr(E[:, 0:1] == E0, name="fr_E_init") # Math: E_{i,0} = E_{i}^{ini}（周期能量初值约束）
+        m.addConstr(E[:, T:T + 1] == E0, name="fr_E_end") # Math: E_{i,T} = E_{i}^{ini}（周期末能量回归初值约束）
 
     def add_cost(self, dt: float, econ) -> dict:
         """镜像 MATLAB 4.9 节（1062-1068）汇总友好电站成本表达式。
@@ -238,15 +259,15 @@ class Friendly:
         fr, var = self.inputs, self.vars
         T = var.E_fr.shape[1] - 1
         C_fr_degrade = dt * (_wsum(fr.c_fr_degrade, var.P_fr_charge, T)
-                             + _wsum(fr.c_fr_degrade, var.P_fr_discharge, T))   # 1063
+                             + _wsum(fr.c_fr_degrade, var.P_fr_discharge, T)) # Math: C_{fr,deg} = \Delta t \sum_{t=1}^{T} \sum_{i} c_{fr,i}^{deg} (P_{c,i,t} + P_{d,i,t})（友好电站储能总寿命损耗成本）
         C_fr_FOM = float(econ.fixedCostScale
                          * (np.sum(fr.fom_wind * fr.wind_cap)
                             + np.sum(fr.fom_pv * fr.pv_cap)
                             + np.sum(fr.fom_power * fr.P_fr_es_max)
-                            + np.sum(fr.fom_energy * fr.E_fr_max)))     # 1064-1066 常数
-        C_fr = C_fr_degrade + C_fr_FOM                                  # 1067
+                            + np.sum(fr.fom_energy * fr.E_fr_max))) # Math: C_{fr,FOM} = \sum_{i} (c_{wind,i}^{FOM} P_{wind,i}^{N} + c_{pv,i}^{FOM} P_{pv,i}^{N} + c_{fr,i}^{FOM} P_{fr,i}^{max} + c_{fr,i}^{E,FOM} E_{fr,i}^{max})（友好电站固定运行维护成本）
+        C_fr = C_fr_degrade + C_fr_FOM # Math: C_{fr} = C_{fr,deg} + C_{fr,FOM}（友好电站总运行成本）
         C_fr_curt = (econ.c_wind_curt * dt * var.P_fr_wind_curt.sum()
-                     + econ.c_pv_curt * dt * var.P_fr_pv_curt.sum())  # 1068
+                     + econ.c_pv_curt * dt * var.P_fr_pv_curt.sum()) # Math: C_{fr,curt} = \Delta t (c_{wind}^{curt} \sum_{t=1}^{T} \sum_{i} P_{wind,i,t}^{curt} + c_{pv}^{curt} \sum_{t=1}^{T} \sum_{i} P_{pv,i,t}^{curt})（友好电站总弃风弃光惩罚成本）
         return {"C_fr_degrade": C_fr_degrade, "C_fr_FOM": C_fr_FOM,
                 "C_fr": C_fr, "C_fr_curt": C_fr_curt}
 

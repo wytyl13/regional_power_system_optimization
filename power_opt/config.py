@@ -10,7 +10,7 @@
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parent
-MATLAB_DIR = PROJECT_DIR.parent / "海南2030算例"
+MATLAB_DIR = PROJECT_DIR.parent / "海南2030算例20261014" / "海南2030算例"
 
 UNIT_FILE = MATLAB_DIR / "分区机组信息表.xlsx"
 PROFILE_FILE = MATLAB_DIR / "运行数据.xlsx"

@@ -71,6 +71,16 @@ class Nuclear:
         req_nuc = ["UnitKey", "SUBSTR(C.ID，12)", "CAP", "MIN_POWER_GEN", "GEN_COST",
                    "INIT_POWER", "RAMP_LIMIT_UP", "RAMP_LIMIT_DOWN",
                    "INIT_MAINTENANCE", "FOM_COST_PERIOD"]
+        """
+        CAP：额定容量
+        MIN_POWER_GEN：最小技术出力
+        GEN_COST：单位发电成本，元/MWh
+        INIT_POWER：周期前功率（初始出力）
+        RAMP_LIMIT_UP：向上爬坡（允许的功率上升速率）
+        RAMP_LIMIT_DOWN：向下爬坡（允许的功率下降速率）
+        INIT_MAINTENANCE：周期前检修状态，0/1
+        FOM_COST_PERIOD：年度功率运维成本
+        """
         nucData = _read(config.UNIT_FILE, "核电", req_nuc)
         N_nuc = len(nucData)
         zone_nuc = [_zstr(v) for v in nucData["SUBSTR(C.ID，12)"]]
@@ -123,7 +133,7 @@ class Nuclear:
         """
         nuc = self.inputs
         N, T = nuc.N_nuc, nuc.m_nuc.shape[1]
-        P_nuc = m.addMVar((N, T), lb=-INF, name="P_nuc")                     # MATLAB 652
+        P_nuc = m.addMVar((N, T), lb=-INF, name="P_nuc")
         self.vars = NuclearVars(P_nuc=P_nuc)
         return self.vars
 
@@ -150,8 +160,8 @@ class Nuclear:
         # ---- MATLAB 894-895：P_min·u_nuc <= P_nuc <= P_max·u_nuc（u_nuc 常数，右端全常数）----
         PminU = np.repeat(nuc.P_nuc_min[:, None], T, axis=1) * u_nuc    # repmat(P_min).*u
         PmaxU = np.repeat(nuc.P_nuc_max[:, None], T, axis=1) * u_nuc    # repmat(P_max).*u
-        m.addConstr(PminU <= P, name="Pmin")                                # 894
-        m.addConstr(P <= PmaxU, name="Pmax")                                # 895
+        m.addConstr(PminU <= P, name="Pmin") # Math: P_{nuc,i}^{min} u_{nuc,i,t} \le P_{nuc,i,t}（最小技术出力下限约束）
+        m.addConstr(P <= PmaxU, name="Pmax") # Math: P_{nuc,i,t} \le P_{nuc,i}^{max} u_{nuc,i,t}（最大技术出力上限约束）
 
         # ---- MATLAB 896-897：previous 拼接（首列用初值）----
         m_prev = np.concatenate([nuc.m_nuc_0[:, None], nuc.m_nuc[:, :-1]], axis=1)  # 897
@@ -162,11 +172,11 @@ class Nuclear:
         P0 = nuc.P_nuc_0[:, None]
 
         # ---- MATLAB 901-902：爬坡，检修边界以 M 放松。首时段 prev = P_nuc_0 常数 ----
-        m.addConstr(P[:, 0:1] - P0 <= RU[:, 0:1] + M_nuc[:, 0:1], name="ramp_up_t0")   # 901 首时段
-        m.addConstr(P0 - P[:, 0:1] <= RD[:, 0:1] + M_nuc[:, 0:1], name="ramp_dn_t0")   # 902 首时段
+        m.addConstr(P[:, 0:1] - P0 <= RU[:, 0:1] + M_nuc[:, 0:1], name="ramp_up_t0") # Math: P_{nuc,i,1} - P_{nuc,i,0} \le R_{nuc,i}^{U} + M_{nuc,i} (m_{nuc,i,1} + m_{nuc,i,0})（首时段向上爬坡约束）
+        m.addConstr(P0 - P[:, 0:1] <= RD[:, 0:1] + M_nuc[:, 0:1], name="ramp_dn_t0") # Math: P_{nuc,i,0} - P_{nuc,i,1} \le R_{nuc,i}^{D} + M_{nuc,i} (m_{nuc,i,1} + m_{nuc,i,0})（首时段向下爬坡约束）
         if T > 1:
-            m.addConstr(P[:, 1:] - P[:, :-1] <= RU[:, 1:] + M_nuc[:, 1:], name="ramp_up")  # 901
-            m.addConstr(P[:, :-1] - P[:, 1:] <= RD[:, 1:] + M_nuc[:, 1:], name="ramp_dn")  # 902
+            m.addConstr(P[:, 1:] - P[:, :-1] <= RU[:, 1:] + M_nuc[:, 1:], name="ramp_up") # Math: P_{nuc,i,t} - P_{nuc,i,t-1} \le R_{nuc,i}^{U} + M_{nuc,i} (m_{nuc,i,t} + m_{nuc,i,t-1})（常规时段向上爬坡约束）
+            m.addConstr(P[:, :-1] - P[:, 1:] <= RD[:, 1:] + M_nuc[:, 1:], name="ramp_dn") # Math: P_{nuc,i,t-1} - P_{nuc,i,t} \le R_{nuc,i}^{D} + M_{nuc,i} (m_{nuc,i,t} + m_{nuc,i,t-1})（常规时段向下爬坡约束）
 
     def add_cost(self, dt: float, econ) -> dict:
         """镜像 MATLAB 4.10 节（1070-1073）汇总核电成本表达式。
@@ -182,9 +192,9 @@ class Nuclear:
         """
         T = self.inputs.m_nuc.shape[1]
         var, nuc = self.vars, self.inputs
-        C_nuc_gen = dt * _wsum(nuc.c_nuc_gen, var.P_nuc, T)               # 1071
-        C_nuc_FOM = float(np.sum(nuc.c_nuc_FOM * nuc.P_nuc_max))           # 1072 常数
-        C_nuc = C_nuc_gen + C_nuc_FOM                                       # 1073
+        C_nuc_gen = dt * _wsum(nuc.c_nuc_gen, var.P_nuc, T) # Math: C_{nuc,gen} = \Delta t \sum_{t=1}^{T} \sum_{i} c_{nuc,i}^{gen} P_{nuc,i,t}（核电机组总发电成本）
+        C_nuc_FOM = float(np.sum(nuc.c_nuc_FOM * nuc.P_nuc_max)) # Math: C_{nuc,FOM} = \sum_{i} c_{nuc,i}^{FOM} P_{nuc,i}^{max}（核电机组固定运行维护成本）
+        C_nuc = C_nuc_gen + C_nuc_FOM # Math: C_{nuc} = C_{nuc,gen} + C_{nuc,FOM}（核电机组总运行成本）
         return {"C_nuc": C_nuc, "C_nuc_gen": C_nuc_gen, "C_nuc_FOM": C_nuc_FOM}
 
 

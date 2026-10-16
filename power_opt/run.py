@@ -20,7 +20,8 @@ from pathlib import Path
 
 import config
 import power_opt.reader as reader
-from solution import SolutionData, compute_metrics, write_result_json
+from analysis_export import AnalysisExport
+from solution import Solution, write_result_json
 from solve import solve
 
 
@@ -73,8 +74,8 @@ def _apply(cfg: RunConfig) -> None:
         config.USE_FIXED_TRANSFER = cfg.use_fixed_transfer
 
 
-def run(cfg: RunConfig) -> SolutionData:
-    """应用配置 → 读输入 → 求解。返回 SolutionData（纯数据，不含落盘 json）。
+def run(cfg: RunConfig) -> Solution:
+    """应用配置 → 读输入 → 求解。返回 Solution（纯数据，不含落盘 json）。
 
     结果落盘位置：solve() 会把 config.RESULT_DIR 再指到其下
     T{T}_gap{MIGAP}_{时间戳} 子目录并写 csv/log；该子目录可用 last_result_dir() 取回。
@@ -91,18 +92,18 @@ def last_result_dir() -> Path:
     return Path(config.RESULT_DIR)
 
 
-def run_with_outputs(cfg: RunConfig) -> tuple[SolutionData, object, dict]:
-    """run() + metrics + 结果.json 落盘，一步到位。
+def run_with_outputs(cfg: RunConfig) -> tuple[Solution, object]:
+    """run() + 结果.json 落盘（算法对拍件：meta+four_items+costs+metrics 标量）。
 
-    返回 (solution, inp, metrics)——服务层需要 inp/metrics 组装 views/report，
-    落盘结果用 last_result_dir() 取，不必摸 config 全局态。
+    返回 (solution, inp)——服务层自建 AnalysisExport(inp, solution) 组装
+    analysis/views/metrics 与前端件（report/positionChart），不再读 结果.json。
     """
     _apply(cfg)
     inp = reader.load_inputs()
     solution = solve(inp)
-    metrics = compute_metrics(inp, solution)
-    write_result_json(inp, solution, config, metrics)
-    return solution, inp, metrics
+    metrics = AnalysisExport(inp, solution).metrics()
+    write_result_json(inp, solution, metrics)
+    return solution, inp
 
 
 if __name__ == "__main__":

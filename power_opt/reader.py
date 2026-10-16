@@ -66,6 +66,13 @@ class TimeAxis:
 
 
 @dataclass
+class HeatingCalendar:
+    """分区供暖日历（1.1 供暖期设置）：分区清单与逐时供暖标记矩阵。"""
+    ZoneID: list                  # 分区编号（字符串，供暖期设置表行序）
+    isHeatingPeriod: np.ndarray   # 分区×T 供暖期标记，True=供暖期（跨年取并集）
+
+
+@dataclass
 class EconomicParams:
     """系统经济参数（1.2）：货币折算、固定费用折算与惩罚/排放价格。"""
     costScale: float                  # 基准期原货币 → 元 折算系数
@@ -142,6 +149,7 @@ class Inputs:
     节次类内部字段名与 MATLAB 工作区变量一致（叶级一一对应）。
     """
     time: TimeAxis                     # 时间轴（1.1）
+    heating: HeatingCalendar           # 供暖日历（1.1 供暖期设置，煤/气/生物质共用）
     econ: EconomicParams                # 系统经济参数（1.2）
     areas: Areas                        # 分区（1.11）
     maintenance: pd.DataFrame          # 检修计划总表（各电源文件按 Type 领取）
@@ -172,6 +180,28 @@ class InputReader:
         Day = list(dict.fromkeys(Time.normalize()))
         Nday = len(Day)
         return TimeAxis(T=T, Delta_t=Delta_t, Time=Time, Day=Day, Nday=Nday)
+
+    # ---- 1.1 供暖日历（MATLAB 46-61）：Enabled=0 全年非供暖，=1 按起止月日切换（含端点，可跨年）----
+    def load_heating_calendar(self, time: TimeAxis) -> HeatingCalendar:
+        """读供暖期设置表并按时间轴展开，返回供暖日历：分区清单 ZoneID、
+        分区×T 供暖标记 isHeatingPeriod（起始月日晚于结束月日表示跨年，
+        取两段并集；Enabled=0 的行全年 False）。"""
+        hd = _read(config.UNIT_FILE, "供暖期设置",
+                   ["ZoneID", "Enabled", "StartMonth", "StartDay", "EndMonth", "EndDay"])
+        ZoneID = [_zstr(v) for v in hd["ZoneID"]]
+        # MATLAB 50：calendarDay = 100*month+day，逐小时一个整数
+        calendarDay = np.array([100 * t.month + t.day for t in time.Time])
+        isHeatingPeriod = np.zeros((len(hd), time.T), dtype=bool)   # 行为分区，列为仿真小时
+        for z, row in hd.iterrows():
+            if int(row["Enabled"]) == 0:
+                continue
+            firstDay = 100 * int(row["StartMonth"]) + int(row["StartDay"])
+            lastDay = 100 * int(row["EndMonth"]) + int(row["EndDay"])
+            if firstDay <= lastDay:
+                isHeatingPeriod[z, :] = (calendarDay >= firstDay) & (calendarDay <= lastDay)
+            else:
+                isHeatingPeriod[z, :] = (calendarDay >= firstDay) | (calendarDay <= lastDay)
+        return HeatingCalendar(ZoneID=ZoneID, isHeatingPeriod=isHeatingPeriod)
 
     # ---- 1.2 系统经济参数（MATLAB 66-75）----
     def load_economic_params(self, time: TimeAxis) -> EconomicParams:
@@ -481,6 +511,7 @@ class InputReader:
     def load(self) -> Inputs:
         """按依赖顺序执行各 load_x 方法，数值安全检查后组装组合式 Inputs。"""
         time = self.load_time()                                # 时间轴
+        heating = self.load_heating_calendar(time)             # 供暖日历
         econ = self.load_economic_params(time)                 # 系统经济参数
         areas = self.load_areas()                              # 分区
         maintenance = self.load_maintenance()                 # 检修计划
@@ -500,7 +531,7 @@ class InputReader:
             if not np.all(np.isfinite(arr)):
                 raise ValueError(f"{name} 含 NaN/Inf，检查上游数据")
 
-        return Inputs(time=time, econ=econ, areas=areas, maintenance=maintenance,
+        return Inputs(time=time, heating=heating, econ=econ, areas=areas, maintenance=maintenance,
                       wind_pv=wind_pv, profiles=profiles, lines=lines,
                       prov=prov, dr=dr, week_peak=week_peak)
 
@@ -512,7 +543,7 @@ def load_inputs() -> Inputs:
 def _flatten(inp: Inputs) -> dict:
     """组合式 Inputs → 扁平字段字典（节次字段名与旧版 Inputs 一致）。"""
     flat = {}
-    for name in ("time", "econ", "areas", "wind_pv", "profiles", "lines", "prov", "dr"):
+    for name in ("time", "heating", "econ", "areas", "wind_pv", "profiles", "lines", "prov", "dr"):
         section = getattr(inp, name)
         for f in fields(section):
             flat[f.name] = getattr(section, f.name)
