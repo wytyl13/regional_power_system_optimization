@@ -28,6 +28,42 @@ $env:PYTHONPATH = ".." ; $env:GRB_LICENSE_FILE="C:\gurobi1300\win64\bin\gurobi.l
 cd ../service &&
 ```
 
+## 核心算法维护与版本更新
+
+> 采用 **Fork + Pull Request** 模式：协作者不需要仓库权限，所有改动经仓库所有者审核合并后才进入 `main`。
+
+```bash
+# 0. 网页 Fork：打开 github.com/wytyl13/regional_power_system_optimization → 右上角 Fork 到自己账号（一次性）
+
+# 1. 首次：克隆自己的 Fork + 配置身份 + 关联上游
+git clone https://github.com/你的账号/regional_power_system_optimization.git
+cd regional_power_system_optimization
+git config user.name "姓名"
+git config user.email "邮箱"
+git remote add upstream https://github.com/wytyl13/regional_power_system_optimization.git
+
+# 2. 每次开发前：同步上游最新代码（仓库只有 main 分支，无 dev）
+git checkout main
+git pull upstream main
+git push origin main
+
+# 3. 建功能分支开发（核心算法代码在 power_opt/ 下）
+git checkout -b feature/algo-update
+git add power_opt/
+git commit -m "feature(algo): 描述改了什么"
+
+# 4. 推送到自己的 Fork
+git push origin feature/algo-update
+
+# 5. 网页开 Pull Request：从 你的账号:feature/algo-update → wytyl13/regional_power_system_optimization:main
+#    仓库所有者审核后点 Merge
+
+# 6. 合并后同步并清理
+git checkout main && git pull upstream main && git push origin main
+git branch -d feature/algo-update
+git push origin --delete feature/algo-update
+```
+
 ## 架构
 
 > 核心算法（power_opt）分层，依赖单向、禁止反向 import。完整规则见 `.claude/skills/architecture_rule.md`、`data_rule.md`、`code_basic_rule.md`；README 自身的同步维护规则见 `.claude/skills/readme_rule.md`（代码改了 README 不同步 = 改动未完成）。
