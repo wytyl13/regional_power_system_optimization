@@ -1,9 +1,14 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""算法侧自检（不依赖 FastAPI）：小规模求解 → 恒等式断言 + 输出件比对。
+"""
+@Time    : 2026/10/13 08:36
+@Author  : weiyutao
+@File    : test_algorithm.py
+
+算法侧自检（不依赖 FastAPI）：小规模求解 → 恒等式断言 + 输出件比对。
 
 用法（power_opt 目录下）：
-    python ../tests/test_algrithm.py          # T=24 全流程自检
+    python ../tests/test_algorithm.py          # T=24 全流程自检
 断言口径：
     1) 成本分解恒等式（对齐 MATLAB 1312 CostReconciliationError ≈1e-7）：
        六项之和 == 十项之和 == Objective。
@@ -32,6 +37,11 @@ from solution import write_result_json
 
 
 def main():
+    """T=24 小规模求解 → 四组恒等式断言 + 落盘件契约校验（见模块 docstring）。
+
+    Returns:
+        int: 0 = 全部自检通过，1 = 无可行解/断言失败。
+    """
     # 自检固定小规模T=24：不受 config.T 干扰（跑 T=168 大模型须挂大 license 且耗时长）
     config.T = 24
     if config.MIGAP > 0.01:

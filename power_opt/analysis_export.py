@@ -31,7 +31,15 @@ import plot as PL
 
 
 def _aggregation(total_rows, areas):
-    """机组 → 分区归属矩阵 (Narea,n)：第 i 台机组在第 area_i 行置 1。"""
+    """机组 → 分区归属矩阵 (Narea,n)：第 i 台机组在第 area_i 行置 1。
+
+    Args:
+        total_rows: 分区数 Narea（矩阵行数；形参名沿用旧调用）。
+        areas: 各机组 0 基分区索引数组（列数=机组数）。
+
+    Returns:
+        np.ndarray: 机组→分区归属矩阵 (Narea, n)。
+    """
     matrix = np.zeros((total_rows, len(areas)))
     matrix[areas, np.arange(len(areas))] = 1
     return matrix
@@ -39,7 +47,15 @@ def _aggregation(total_rows, areas):
 
 def _compute_metrics(inp, solution) -> dict:
     """组装期派生指标（MATLAB 1177-1190 自检 + report 专用量）。
-    原在 solution.py，v2 并入本文件（分析口径）；write_result_json 与五张分析表从这里取数。"""
+    原在 solution.py，v2 并入本文件（分析口径）；write_result_json 与五张分析表从这里取数。
+
+    Args:
+        inp (Inputs): 系统公共输入。
+        solution (Solution): 求解结果。
+
+    Returns:
+        dict: 指标字典（balanceErrorMW/renewableUtilization 等 + P_D/Rhot 中间量）。
+    """
     V = solution.values
     U = solution.units
     F = solution.inputs_fields
@@ -124,7 +140,14 @@ def _compute_metrics(inp, solution) -> dict:
 
 def cost_analysis(solution):
     """六项 + 十项两种分解；同一总成本的两个视角，不能相加。
-    排放已计入发电项，不再单列六项之外；C_inter 海南无互济量 = 0。"""
+    排放已计入发电项，不再单列六项之外；C_inter 海南无互济量 = 0。
+
+    Args:
+        solution (Solution): 求解结果。
+
+    Returns:
+        dict: {costSummary: 六项分解, costDetail: 十项分解}。
+    """
     C = solution.costs
     total = float(solution.four_items["objective"]["value"])
     six_names = ["发电成本", "储能成本", "需求响应", "弃电惩罚", "失负荷惩罚", "省间互济"]
@@ -165,7 +188,15 @@ def cost_analysis(solution):
 
 def thermal_analysis(inp, solution):
     """煤电+气电逐台：启动/停机次数直接取 v/w（不推断）、在线小时、检修小时、
-    发电量与等效满负荷小时（=发电量/额定容量）。统计含首小时相对初态的切换。"""
+    发电量与等效满负荷小时（=发电量/额定容量）。统计含首小时相对初态的切换。
+
+    Args:
+        inp (Inputs): 系统公共输入。
+        solution (Solution): 求解结果。
+
+    Returns:
+        dict: {thermalSummary: 煤电+气电逐台统计行列表}。
+    """
     V = solution.values
     U = solution.units
     rows = []
@@ -192,7 +223,15 @@ def thermal_analysis(inp, solution):
 def storage_analysis(inp, solution):
     """抽蓄/电储能/友好站逐台：充/放电量、SOC min/max%、放电侧等效循环
     （=放电量/额定能量，输出侧口径非寿命模型）、首末能量差。
-    E 第 0 列 = 初始能量、第 k 列 = 第 k 小时末；SOC 轨迹含首尾 T+1 个边界点。"""
+    E 第 0 列 = 初始能量、第 k 列 = 第 k 小时末；SOC 轨迹含首尾 T+1 个边界点。
+
+    Args:
+        inp (Inputs): 系统公共输入。
+        solution (Solution): 求解结果。
+
+    Returns:
+        dict: {storageSummary: 三类储能逐台统计行列表}。
+    """
     V = solution.values
     U = solution.units
     rows = []
@@ -228,7 +267,15 @@ def storage_analysis(inp, solution):
 
 def device_analysis(inp, solution):
     """11 类设备全 T 小时电量和最大出力。放电量单列、不解释为一次能源结构；
-    友好站只计净上网（风直送+光直送+放电），不与站内量重复计入。"""
+    友好站只计净上网（风直送+光直送+放电），不与站内量重复计入。
+
+    Args:
+        inp (Inputs): 系统公共输入。
+        solution (Solution): 求解结果。
+
+    Returns:
+        dict: {deviceSummary: 设备电量/峰值, renewableSummary: 风光消纳}。
+    """
     V = solution.values
     dt = inp.time.Delta_t
     fr_net = V["P_fr_wind_out"] + V["P_fr_pv_out"] + V["P_fr_discharge"]
@@ -279,7 +326,15 @@ def device_analysis(inp, solution):
 
 def build_analysis(inp, solution):
     """五表总装：costSummary / costDetail / thermalSummary / storageSummary /
-    deviceSummary / renewableSummary（camelCase，口径对齐 MATLAB 八~十一节）。"""
+    deviceSummary / renewableSummary（camelCase，口径对齐 MATLAB 八~十一节）。
+
+    Args:
+        inp (Inputs): 系统公共输入。
+        solution (Solution): 求解结果。
+
+    Returns:
+        dict: 五表总装（camelCase 键）。
+    """
     analysis = {}
     analysis.update(cost_analysis(solution))
     analysis.update(thermal_analysis(inp, solution))
@@ -306,7 +361,15 @@ def build_views(inp, solution):
       line     {series:{名:[T]}, step?:true, hlines?:[{name,value}]}
       bar      {orientation, categories:[类目], series:{名:[逐类目值]}}
       heatmap  {matrix:[[0/1]], rowLabels:[行名], legendLabels:[状态名]}
-    时序数组统一截 PNG 窗口（前 min(168,T) 小时，MATLAB 1195-1196），前端直接用。"""
+    时序数组统一截 PNG 窗口（前 min(168,T) 小时，MATLAB 1195-1196），前端直接用。
+
+    Args:
+        inp (Inputs): 系统公共输入。
+        solution (Solution): 求解结果。
+
+    Returns:
+        dict: views 块（tab 名 → {title, note?, panels[]}）。
+    """
     V = solution.values
     U = solution.units
     F = solution.inputs_fields
@@ -476,7 +539,18 @@ def build_views(inp, solution):
 # ---------- .mat 导出（MATLAB :1545 save 变量清单）----------
 
 def _table(rows, fields, string_fields=(), int_fields=(), dtypes=None):
-    """camelCase 行 dict 列表 → MATLAB struct array（近似 table 的 struct 化）。"""
+    """camelCase 行 dict 列表 → MATLAB struct array（近似 table 的 struct 化）。
+
+    Args:
+        rows: 行 dict 列表（camelCase 键）。
+        fields: 字段名顺序（=struct 字段序）。
+        string_fields: 按 str 写出的字段名。
+        int_fields: 按 int 写出的字段名。
+        dtypes: 预留参数，当前无调用方使用。
+
+    Returns:
+        np.ndarray: (n, 1) struct array。
+    """
     n = len(rows)
     dtype = [(f, "O") for f in fields]
     arr = np.zeros((n, 1), dtype=dtype)
@@ -492,7 +566,14 @@ def _table(rows, fields, string_fields=(), int_fields=(), dtypes=None):
 
 
 def _cell(arrays):
-    """1×N cell 数组（MATLAB {…} 元胞）"""
+    """1×N cell 数组（MATLAB {…} 元胞）。
+
+    Args:
+        arrays: 待装箱的数组序列。
+
+    Returns:
+        np.ndarray: 1×N object 数组。
+    """
     cell = np.empty((1, len(arrays)), dtype=object)
     for i, a in enumerate(arrays):
         cell[0, i] = np.asarray(a)
@@ -501,7 +582,18 @@ def _cell(arrays):
 
 def write_mat(inp, solution, metrics, analysis, path) -> None:
     """海南分析结果.mat：19 个变量与 MATLAB :1545 save 清单逐一对齐。
-    datetime/string/table 在 scipy 写出端拾遗：→ char / struct array。"""
+    datetime/string/table 在 scipy 写出端拾遗：→ char / struct array。
+
+    Args:
+        inp (Inputs): 系统公共输入。
+        solution (Solution): 求解结果。
+        metrics (dict): 指标字典。
+        analysis (dict): 五表总装。
+        path: 输出 .mat 路径。
+
+    Returns:
+        None
+    """
     from scipy.io import savemat
 
     V = solution.values
@@ -613,7 +705,18 @@ def write_mat(inp, solution, metrics, analysis, path) -> None:
 # ---------- 分析摘要.txt（MATLAB :1509-1544 模板逐行复刻）----------
 
 def write_summary_txt(inp, solution, metrics, analysis, path) -> None:
-    """文案与 %.4f/%.2f 等格式化精度与 MATLAB fprintf 完全一致。"""
+    """文案与 %.4f/%.2f 等格式化精度与 MATLAB fprintf 完全一致。
+
+    Args:
+        inp (Inputs): 系统公共输入。
+        solution (Solution): 求解结果。
+        metrics (dict): 指标字典。
+        analysis (dict): 五表总装。
+        path: 输出 .txt 路径。
+
+    Returns:
+        None
+    """
     obj = solution.four_items["objective"]
     total = obj["value"]
     total_wan = total / 1e4
@@ -678,6 +781,15 @@ def write_summary_txt(inp, solution, metrics, analysis, path) -> None:
 # TickDir out / grid on alpha 0.12（02 火电启停不 grid）→ 180 dpi exportgraphics。
 
 def _styled_axes(ax, grid=True):
+    """分析图统一坐标轴样式（:1490-1495：Box off/TickDir out/grid/标题字号）。
+
+    Args:
+        ax: matplotlib 坐标轴。
+        grid (bool): False 时不画网格（02 火电启停图不 grid）。
+
+    Returns:
+        None
+    """
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
     ax.tick_params(direction="out")
@@ -686,12 +798,29 @@ def _styled_axes(ax, grid=True):
 
 
 def _tick_rows(plot_rows):
-    """MATLAB tickRows：round(linspace(0,n-1,min(9,n))) 去重。"""
+    """MATLAB tickRows：round(linspace(0,n-1,min(9,n))) 去重。
+
+    Args:
+        plot_rows: 绘图窗口行序号数组（只取长度）。
+
+    Returns:
+        np.ndarray: 去重后的刻度行号。
+    """
     return np.unique(np.round(np.linspace(
         0, len(plot_rows) - 1, min(9, len(plot_rows)))).astype(int))
 
 
 def _fig_frame(fig, suptitle, subtitle):
+    """图框总标题 + 副标题（:1490 规格）。
+
+    Args:
+        fig: matplotlib figure。
+        suptitle: 总标题文字。
+        subtitle: 副标题文字；None 不画。
+
+    Returns:
+        None
+    """
     fig.suptitle(suptitle, fontsize=14, fontweight="bold")
     if subtitle:
         fig.text(0.5, 0.925, subtitle, ha="center", fontsize=10,
@@ -700,7 +829,17 @@ def _fig_frame(fig, suptitle, subtitle):
 
 def plot_analysis_figures(inp, solution, analysis, out_dir) -> list:
     """生成 01~07 PNG（落 out_dir），返回文件名列表。00 设备堆叠由 plot_operation
-    另行复制（同一张图 MATLAB 也归 operationFigures）。"""
+    另行复制（同一张图 MATLAB 也归 operationFigures）。
+
+    Args:
+        inp (Inputs): 系统公共输入。
+        solution (Solution): 求解结果。
+        analysis (dict): 五表总装。
+        out_dir: 输出目录（Path）。
+
+    Returns:
+        list: 已写出的 PNG 文件名列表。
+    """
     plt = PL.plt
     plt.rcParams["font.family"] = ["Microsoft YaHei"]
     plt.rcParams["axes.unicode_minus"] = False
@@ -901,7 +1040,18 @@ def plot_analysis_figures(inp, solution, analysis, out_dir) -> list:
 
 def export_analysis(inp, solution, metrics, analysis=None, result_root=None) -> None:
     """分析结果四件套落盘：00 PNG + 01~07 PNG + 海南分析结果.mat + 分析摘要.txt。
-    目录 = RESULT_DIR/分析结果/{起始 yyyymmdd_HHMM}_{T}h_{当前时间戳}（对齐 :1484-1486）。"""
+    目录 = RESULT_DIR/分析结果/{起始 yyyymmdd_HHMM}_{T}h_{当前时间戳}（对齐 :1484-1486）。
+
+    Args:
+        inp (Inputs): 系统公共输入。
+        solution (Solution): 求解结果。
+        metrics (dict): 指标字典。
+        analysis: 五表总装；None 时现算。
+        result_root: 输出根目录；None 时用 RESULT_DIR。
+
+    Returns:
+        None
+    """
     from pathlib import Path
     if analysis is None:
         analysis = build_analysis(inp, solution)
@@ -929,26 +1079,55 @@ class AnalysisExport:
     只读 Solution（下游零 gurobipy 依赖）；服务层经 run.py 转发使用本类。"""
 
     def __init__(self, inp, solution):
+        """保存输入与求解结果；metrics 首次调用后缓存。
+
+        Args:
+            inp (Inputs): 系统公共输入。
+            solution (Solution): 求解结果。
+
+        Returns:
+            None
+        """
         self.inp = inp
         self.solution = solution
         self._metrics = None
 
     def metrics(self) -> dict:
-        """组装期派生指标（残差/利用率/失负荷/备用裕度/CO₂/储能闭合）。"""
+        """组装期派生指标（残差/利用率/失负荷/备用裕度/CO₂/储能闭合）。
+
+        Returns:
+            dict: 指标字典（首次计算后缓存）。
+        """
         if self._metrics is None:
             self._metrics = _compute_metrics(self.inp, self.solution)
         return self._metrics
 
     def build_analysis(self) -> dict:
-        """五表总装（camelCase，口径对齐 MATLAB 八~十一节）。"""
+        """五表总装（camelCase，口径对齐 MATLAB 八~十一节）。
+
+        Returns:
+            dict: 五表总装。
+        """
         return build_analysis(self.inp, self.solution)
 
     def build_views(self) -> dict:
-        """前端 views 块（8 tab；positionChart 由 service 侧组装注入）。"""
+        """前端 views 块（8 tab；positionChart 由 service 侧组装注入）。
+
+        Returns:
+            dict: views 块。
+        """
         return build_views(self.inp, self.solution)
 
     def export(self, metrics: dict | None = None, result_root=None) -> None:
-        """分析结果四件套落盘（00 PNG + 01~07 PNG + .mat + 摘要.txt）。"""
+        """分析结果四件套落盘（00 PNG + 01~07 PNG + .mat + 摘要.txt）。
+
+        Args:
+            metrics (dict | None): 指标字典；None 时用 self.metrics()。
+            result_root: 输出根目录；None 时用 RESULT_DIR。
+
+        Returns:
+            None
+        """
         export_analysis(self.inp, self.solution,
                         metrics if metrics is not None else self.metrics(),
                         result_root=result_root)

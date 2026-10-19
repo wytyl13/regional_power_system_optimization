@@ -1,6 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""接口测试 1/2：POST /api/datasets 上传模版 → 校验新契约（categories/config/fixedParams）。
+"""
+@Time    : 2026/10/13 08:36
+@Author  : weiyutao
+@File    : test_api_upload.py
+
+接口测试 1/2：POST /api/datasets 上传模版 → 校验新契约（categories/config/fixedParams）。
 
 用法（项目根目录）：
     python tests/test_api_upload.py <模版.xlsx 路径>   # 缺省 海南2030算例_20261012/数据模版-海南.xlsx
@@ -20,7 +25,14 @@ HERE = Path(__file__).resolve().parent
 
 
 def upload(path: Path) -> dict:
-    """multipart/form-data 手工拼装（环境无 requests，用标准库）。"""
+    """multipart/form-data 手工拼装（环境无 requests，用标准库）。
+
+    Args:
+        path (Path): 模版文件路径。
+
+    Returns:
+        dict: 上传端点响应 JSON。
+    """
     boundary = "----" + uuid.uuid4().hex
     filename = path.name
     # 中文文件名按请求头声明的 UTF-8 编码传输（RFC 7578 §4.2 filename*= 形式更严，
@@ -40,7 +52,14 @@ def upload(path: Path) -> dict:
 
 def get(path: str) -> dict:
     """path 含中文（sheet 名/query 值），逐段 percent-encode 后请求。
-    服务端 FastAPI/Starlette 自动解码回 str。"""
+    服务端 FastAPI/Starlette 自动解码回 str。
+
+    Args:
+        path (str): API 路径（不含 BASE，可带 query）。
+
+    Returns:
+        dict: 响应 JSON。
+    """
     base, _, q = path.partition("?")
     url = "/".join(urllib.parse.quote(seg, safe="") for seg in base.split("/"))
     if q:
@@ -52,6 +71,11 @@ def get(path: str) -> dict:
 
 
 def main() -> int:
+    """上传模版并校验新契约：八字段/categories 五大类/曲线懒加载/config 表单/fixedParams。
+
+    Returns:
+        int: 0 = PASS，1 = 模版不存在或断言失败。
+    """
     xlsx = Path(sys.argv[1]) if len(sys.argv) > 1 else \
         HERE.parent / "海南2030算例_20261012" / "数据模版-海南.xlsx"
     if not xlsx.exists():

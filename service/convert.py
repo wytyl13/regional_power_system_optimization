@@ -1,7 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
+@Time    : 2026/09/29 13:41
+@Author  : weiyutao
 @File    : convert.py
+
 模版解析结果 + 生效配置 → 三份中间表（分区机组信息表 / 算例系统参数 / 运行数据）。
 reader.py 及以下（model/solve）不改，本文件是它们唯一的上游。
 
@@ -97,31 +100,72 @@ CSP_T_COLS = ["Time", "UnitKey", "DNI_W_m2"]
 
 
 def _pct(x: float) -> str:
+    """比例 → 百分数文本（整值不带小数点）。
+
+    Args:
+        x (float): 比例值（0~1）。
+
+    Returns:
+        str: 百分数文本（如 '10%'）。
+    """
     v = x * 100
     return f"{int(v)}%" if v == int(v) else f"{v:g}%"
 
 
 def _pick(v, default):
-    """None（前端显式传 null）视为未提供，回落收资值；0 是合法值，不能用 or。"""
+    """None（前端显式传 null）视为未提供，回落收资值；0 是合法值，不能用 or。
+
+    Args:
+        v: 用户传入值（None 表示未提供）。
+        default: 回落默认值（收资值）。
+
+    Returns:
+        用户值；v 为 None 时回落 default。
+    """
     return default if v is None else v
 
 
 def _num(x: float) -> str:
+    """数值 → 紧凑文本（整值不带小数点，其余按 %g 有效位）。"""
     return str(int(x)) if float(x) == int(x) else f"{x:g}"
 
 
 def _energy_mwh(cap_mw: float, hours: float, efficiency: float) -> float:
-    """储能量 = 功率 × 时长 × sqrt(转换效率) / 0.8（三处已数值验证）"""
+    """储能量 = 功率 × 时长 × sqrt(转换效率) / 0.8（三处已数值验证）
+
+    Args:
+        cap_mw (float): 功率（MW）。
+        hours (float): 储能时长（h）。
+        efficiency (float): 转换效率（0~1）。
+
+    Returns:
+        float: 储能量（MWh）。
+    """
     return cap_mw * hours * math.sqrt(efficiency) / ENERGY_DIVISOR
 
 
 def _iso_date(v) -> str:
-    """投产时间 → 'YYYY-MM-DD' 文本（对齐基准三份表的存法）。"""
+    """投产时间 → 'YYYY-MM-DD' 文本（对齐基准三份表的存法）。
+
+    Args:
+        v: 源表投产时间单元格值（pd.Timestamp 可解析）。
+
+    Returns:
+        str: 'YYYY-MM-DD' 文本。
+    """
     return str(pd.Timestamp(v).date())
 
 
 def _included(row: dict, year: int) -> tuple[bool, str]:
-    """目标年在场筛选：容量>0、投产≤年末、退役（若有）晚于年末。"""
+    """目标年在场筛选：容量>0、投产≤年末、退役（若有）晚于年末。
+
+    Args:
+        row (dict): 模版机组行（装机容量/投产时间/退役时间）。
+        year (int): 目标年。
+
+    Returns:
+        tuple[bool, str]: (是否纳入, 未纳入原因)；纳入时原因为空串。
+    """
     cap = row.get("装机容量")
     if cap is None or float(cap) <= 0:
         return False, "装机容量为 0"
@@ -136,7 +180,15 @@ def _included(row: dict, year: int) -> tuple[bool, str]:
 
 def _week_dates(weeks: str, year: int) -> tuple[pd.Timestamp, pd.Timestamp]:
     """非运行周 '40-43' → [首周周一, 末周次周一) ，年初年末截断。
-    周锚点：包含 1 月 1 日的那一周的周一为第 1 周（2030 即 2029-12-31，全年 53 周）。"""
+    周锚点：包含 1 月 1 日的那一周的周一为第 1 周（2030 即 2029-12-31，全年 53 周）。
+
+    Args:
+        weeks (str): 非运行周区间文本（'40-43' 或单周 '40'）。
+        year (int): 目标年。
+
+    Returns:
+        tuple[pd.Timestamp, pd.Timestamp]: (首周周一, 末周次周一)。
+    """
     s = str(weeks).strip()
     a, b = (int(x) for x in s.split("-")) if "-" in s else (int(s), int(s))
     jan1 = pd.Timestamp(year, 1, 1)
@@ -147,7 +199,16 @@ def _week_dates(weeks: str, year: int) -> tuple[pd.Timestamp, pd.Timestamp]:
 
 
 def convert(parsed: dict, user_config: dict | None, out_dir) -> dict:
-    """生成三份中间表到 out_dir，返回摘要（含未纳入机组清单）。"""
+    """生成三份中间表到 out_dir，返回摘要（含未纳入机组清单）。
+
+    Args:
+        parsed (dict): parse_template 的结构化结果。
+        user_config (dict | None): 用户 config；None 用默认。
+        out_dir: 输出目录（不存在则创建）。
+
+    Returns:
+        dict: 摘要 {unitCounts, maintenance, excluded, capacityMW}。
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     cfg = merge_config(user_config)
@@ -172,7 +233,19 @@ def convert(parsed: dict, user_config: dict | None, out_dir) -> dict:
 
     # ============ 机组表 ============
     def unit_rows(rows, type_code, type_name, name_fn, build_fn, extra_keys=()):
-        """编号覆盖全部模版行（含剔除），返回 (行列表, {模版行 → UnitKey})。"""
+        """编号覆盖全部模版行（含剔除），返回 (行列表, {模版行 → UnitKey})。
+
+        Args:
+            rows (list[dict]): 模版机组行。
+            type_code (str): UnitKey 的类型码（如 'TH'）。
+            type_name (str): 设备中文名（剔除清单用）。
+            name_fn: 行 → 机组名（剔除清单用）。
+            build_fn: (UnitKey, 行) → 中间表行 dict。
+            extra_keys: 预留附加键（v1 未用）。
+
+        Returns:
+            tuple[list[dict], dict]: (中间表行列表, {id(模版行) → UnitKey})。
+        """
         out, keyOf = [], {}
         for i, r in enumerate(rows, 1):
             key = f"{prov}_{type_code}_{i:03d}"
@@ -193,6 +266,15 @@ def convert(parsed: dict, user_config: dict | None, out_dir) -> dict:
     c = u_cfg["coal"]
 
     def build_coal(key, r):
+        """煤电模版行 → 分区机组信息表行（技术/成本缺项取 coal 配置组）。
+
+        Args:
+            key (str): UnitKey。
+            r (dict): 煤电模版行。
+
+        Returns:
+            dict: COAL_COLS 一行的取值。
+        """
         cap = r["装机容量"] * WAN
         pmin = cap * r["非供暖期最小技术出力率"]
         return {"UnitKey": key, "ID": key, "NAME": _name_with_no(r), AREA_COL: 1,
@@ -234,6 +316,15 @@ def convert(parsed: dict, user_config: dict | None, out_dir) -> dict:
     g = u_cfg["gas"]
 
     def build_gas(key, r):
+        """气电模版行 → 分区机组信息表行（成本三系数置 0，走 GEN_COST 线性项）。
+
+        Args:
+            key (str): UnitKey。
+            r (dict): 气电模版行。
+
+        Returns:
+            dict: GAS_COLS 一行的取值。
+        """
         cap = r["装机容量"] * WAN
         pmin = cap * r["非供暖期最小技术出力率"]
         return {"UnitKey": key, "ID": key, "NAME": _name_with_no(r), AREA_COL: 1,
@@ -261,6 +352,15 @@ def convert(parsed: dict, user_config: dict | None, out_dir) -> dict:
     n = u_cfg["nuclear"]
 
     def build_nuc(key, r):
+        """核电模版行 → 分区机组信息表行（收资无最小出力列，按基荷处理）。
+
+        Args:
+            key (str): UnitKey。
+            r (dict): 核电模版行。
+
+        Returns:
+            dict: NUC_COLS 一行的取值。
+        """
         cap = r["装机容量"] * WAN
         return {"UnitKey": key, "ID": key, "NAME": r["电站名称"], AREA_COL: 1,
                 "PLANT_ID": r["电站名称"], "CAP": cap, "MIN_POWER_GEN": cap,
@@ -280,6 +380,15 @@ def convert(parsed: dict, user_config: dict | None, out_dir) -> dict:
     b = u_cfg["biomass"]
 
     def build_bio(key, r):
+        """生物质模版行 → 分区机组信息表行（含年电量上限 ENERGY_LIMIT_MWH）。
+
+        Args:
+            key (str): UnitKey。
+            r (dict): 生物质模版行。
+
+        Returns:
+            dict: BIO_COLS 一行的取值。
+        """
         cap = r["装机容量"] * WAN
         pmin = cap * r["非供暖期最小技术出力率"]
         derate = r["非供暖期受阻率"]
@@ -306,6 +415,15 @@ def convert(parsed: dict, user_config: dict | None, out_dir) -> dict:
     p = u_cfg["pumpedStorage"]
 
     def build_ps(key, r):
+        """抽水蓄能模版行 → 分区机组信息表行（充放效率 = sqrt(源表转换效率)）。
+
+        Args:
+            key (str): UnitKey。
+            r (dict): 抽水蓄能模版行。
+
+        Returns:
+            dict: PS_COLS 一行的取值。
+        """
         cap = r["装机容量"] * WAN
         affi = math.sqrt(r["转换效率"])
         return {"UnitKey": key, "ID": key, "NAME": _name_with_no(r), AREA_COL: 1,
@@ -326,6 +444,15 @@ def convert(parsed: dict, user_config: dict | None, out_dir) -> dict:
     h = u_cfg["hydro"]
 
     def build_hyd(key, r):
+        """常规水电模版行 → 库容式水电表行（月曲线另行写入算例系统参数表）。
+
+        Args:
+            key (str): UnitKey。
+            r (dict): 常规水电模版行。
+
+        Returns:
+            dict: HYD_COLS 一行的取值。
+        """
         return {"UnitKey": key, "NAME": r["电站名称"], "AreaID": 1,
                 "CAP": r["装机容量"] * WAN, "GEN_COST": h["genCost"],
                 "FOM_COST_PERIOD": h["fom"], "SOURCE_REGULATION_FACTOR": r["水库调节系数"]}
@@ -386,6 +513,14 @@ def convert(parsed: dict, user_config: dict | None, out_dir) -> dict:
 
     # ---- 风电 / 光伏（分区聚合，装机=纳入电站之和）----
     def renew_included(rows):
+        """风电/光伏电站在场筛选，剔除的记入 excluded 汇总。
+
+        Args:
+            rows (list[dict]): 电站模版行。
+
+        Returns:
+            list[dict]: 纳入的电站行。
+        """
         out = []
         for r in rows:
             ok, why = _included(r, year)
@@ -411,6 +546,15 @@ def convert(parsed: dict, user_config: dict | None, out_dir) -> dict:
     dates = pd.date_range(f"{year}-01-01 00:00", periods=8760, freq="h")
 
     def _hourly(curve_getter, what):
+        """按 8760 时间轴逐点取曲线值，缺日期/时刻即报错（不补值）。
+
+        Args:
+            curve_getter: Timestamp → 曲线值的取值函数。
+            what (str): 曲线名（报错信息用）。
+
+        Returns:
+            np.ndarray: 8760 个小时值。
+        """
         try:
             return np.array([curve_getter(d) for d in dates])
         except KeyError as e:

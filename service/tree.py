@@ -1,7 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-@File    :tree.py
+@Time    : 2026/09/29 13:41
+@Author  : weiyutao
+@File    : tree.py
+
 模版 xlsx → 前端展示契约两件套：
   build_categories：固定五大类菜单（负荷及备用/电源/送电协议/一体化电站/检修安排），
     细分名=源 sheet 名；小表（源数据表/检修安排）全量内联 {name, columns, rows}；
@@ -43,7 +46,14 @@ CATEGORY_MAP = [
 
 
 def _s(v) -> str:
-    """单元格 → 字符串：None→空串；整值浮点去 .0；日期 → YYYY-MM-DD。"""
+    """单元格 → 字符串：None→空串；整值浮点去 .0；日期 → YYYY-MM-DD。
+
+    Args:
+        v: 单元格值。
+
+    Returns:
+        str: 展示文本。
+    """
     if v is None:
         return ""
     if isinstance(v, float) and v.is_integer():
@@ -56,7 +66,15 @@ def _s(v) -> str:
 def _table(wb, sheet_name: str) -> dict | None:
     """源 sheet → {name, columns, rows}（全字符串、模版表头原样）。
     sheet 不存在或无表头 → None（不出现在菜单）。不洗尾部说明行：
-    尾行若有文字说明也如实展示（收资文件长什么样前端就看到什么样）。"""
+    尾行若有文字说明也如实展示（收资文件长什么样前端就看到什么样）。
+
+    Args:
+        wb (Workbook): 模版工作簿。
+        sheet_name (str): 源 sheet 名。
+
+    Returns:
+        dict | None: {name, columns, rows}；sheet 缺失/无表头 → None。
+    """
     if sheet_name not in wb.sheetnames:
         return None
     it = wb[sheet_name].iter_rows(values_only=True)
@@ -73,6 +91,14 @@ def _table(wb, sheet_name: str) -> dict | None:
 
 
 def _curve_meta(sheet: str) -> dict | None:
+    """细分名 → 曲线懒加载元数据 {sheet, filterBy, match, wholeSheet?}。
+
+    Args:
+        sheet (str): 细分名（CURVE_RULES 的键）。
+
+    Returns:
+        dict | None: 曲线元数据；非曲线细分 → None。
+    """
     if sheet not in CURVE_RULES:
         return None
     target, filter_by, match, drop = CURVE_RULES[sheet]
@@ -84,7 +110,14 @@ def _curve_meta(sheet: str) -> dict | None:
 
 def build_categories(path) -> list[dict]:
     """模版文件 → 固定五大类数组（顺序即渲染序，前端照序展示零写死）。
-    有 items → 二级菜单；无 items（送电协议）→ 本级直接挂 tables。"""
+    有 items → 二级菜单；无 items（送电协议）→ 本级直接挂 tables。
+
+    Args:
+        path: 模版文件路径。
+
+    Returns:
+        list[dict]: 五大类菜单数组。
+    """
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     try:
         categories = []
@@ -117,7 +150,16 @@ def read_curve(path, sheet: str, filters: dict[str, str]) -> dict:
     filters = {filterBy 键: 行上单元格值}（前端从点击行取）。
     返回 {columns, rows}，剔除筛选键列（值已在请求里）。
     表存在但 0 数据行 → 返回空表（未收资如实展示）；
-    有数据但筛选 0 命中 / prefix 有歧义 → ValueError（app.py 转 422，不造数）。"""
+    有数据但筛选 0 命中 / prefix 有歧义 → ValueError（app.py 转 422，不造数）。
+
+    Args:
+        path: 模版文件路径。
+        sheet (str): 目标曲线 sheet 名。
+        filters (dict[str, str]): {filterBy 键: 点击行的单元格值}。
+
+    Returns:
+        dict: {columns, rows}。
+    """
     rule_key = next((k for k, r in CURVE_RULES.items() if r[0] == sheet), None)
     if rule_key is None:
         raise ValueError(f"无此曲线表: {sheet}")

@@ -43,7 +43,15 @@ DEVICE_COLORS = np.array([
 def build_device_data(inp, solution):
     """MATLAB 1188-1196 plotDeviceData：21 列设备×分区×小时，发电正/充电抽水负。
     光热 2026-10-16 接入（A_csp@P_csp_unit；N_csp=0 → 0 列）；
-    省间互济/既定跨区：开关关闭 → 0 列（债，待开关打开）。"""
+    省间互济/既定跨区：开关关闭 → 0 列（债，待开关打开）。
+
+    Args:
+        inp (Inputs): 系统公共输入。
+        solution (Solution): 求解结果。
+
+    Returns:
+        np.ndarray: Narea×T×21 设备功率张量（MW，发电正/充电抽水负）。
+    """
     Z = lambda *shape: np.zeros(shape)                      # 未建模电源列 = 0
     def A(n, area):                                         # 分区归属矩阵 (Narea,n)，同 solve 残差自检
         M = Z(inp.areas.Narea, n); M[area, np.arange(n)] = 1
@@ -80,7 +88,14 @@ def build_device_data(inp, solution):
 
 def _scopes(inp):
     """MATLAB 1217-1224：作用域列表 [(名称, 1×Narea 汇总矩阵)]。
-    全系统 (+多省时省级汇总) + (Narea>1 时各分区)；海南单分区 → 只有全系统。"""
+    全系统 (+多省时省级汇总) + (Narea>1 时各分区)；海南单分区 → 只有全系统。
+
+    Args:
+        inp (Inputs): 系统公共输入。
+
+    Returns:
+        list: [(作用域名, 1×Narea 汇总矩阵), ...]。
+    """
     scopes = [("全系统", np.ones((1, inp.areas.Narea)))]
     if inp.areas.Nprovince > 1:
         A_prov = np.zeros((inp.areas.Nprovince, inp.areas.Narea))
@@ -97,7 +112,16 @@ def write_chart_csv(inp, solution, path=None):
     列名即 PNG 图例文字；充电/抽水/净送出列已是负值，前端正半轴堆正、负半轴堆负即可。
     全 T 行（PNG 只画前 168 小时，前端自行截取）；utf-8-sig 让中文列名 Excel 直开；
     全精度不四舍五入（同其他结果件纪律）。全 0 列（如海南的光热/省间互济）照常输出，
-    前端按 PNG 的 visibleDevices 逻辑隐藏即可。"""
+    前端按 PNG 的 visibleDevices 逻辑隐藏即可。
+
+    Args:
+        inp (Inputs): 系统公共输入。
+        solution (Solution): 求解结果。
+        path: 输出 CSV 路径；None 时落 RESULT_DIR/设备运行数据_T{T}.csv。
+
+    Returns:
+        None
+    """
     device = build_device_data(inp, solution)
     V = solution.values
     P_D = inp.profiles.P_load - V["P_shift_out"] + V["P_shift_in"] \
@@ -120,7 +144,16 @@ def write_chart_csv(inp, solution, path=None):
 
 def plot_operation(inp, solution, save_png=False):
     """MATLAB 1217-1299：全系统（+多省时省级，+Narea>1 时各分区）设备运行堆叠图。
-    海南单分区 → 只有"全系统"1 张图。"""
+    海南单分区 → 只有"全系统"1 张图。
+
+    Args:
+        inp (Inputs): 系统公共输入。
+        solution (Solution): 求解结果。
+        save_png (bool): True 时存 RESULT_DIR/设备运行_{作用域}.png。
+
+    Returns:
+        None
+    """
     # MATLAB 1195-1196：默认展示前 168 小时
     plotRows = np.arange(0, min(168, inp.time.T))
     plotTime = inp.time.Time[plotRows]
@@ -195,20 +228,51 @@ class Plot:
     模块级 build_device_data/_scopes 保留公用（analysis_export 的 views 设备 tab 同口径）。"""
 
     def __init__(self, inp, solution):
+        """保存输入与求解结果，供两个出图方法使用。
+
+        Args:
+            inp (Inputs): 系统公共输入。
+            solution (Solution): 求解结果。
+
+        Returns:
+            None
+        """
         self.inp = inp
         self.solution = solution
 
     def operation_png(self, save_png: bool = True):
-        """全系统（+多省/多分区）设备运行堆叠图（MATLAB 1217-1299）。"""
+        """全系统（+多省/多分区）设备运行堆叠图（MATLAB 1217-1299）。
+
+        Args:
+            save_png (bool): True 时落盘 PNG。
+
+        Returns:
+            None
+        """
         return plot_operation(self.inp, self.solution, save_png=save_png)
 
     def chart_csv(self, path=None):
-        """绘图曲线 CSV（前端复现 设备运行_*.png 用）：Time + 21 设备列 + 2 条负荷线。"""
+        """绘图曲线 CSV（前端复现 设备运行_*.png 用）：Time + 21 设备列 + 2 条负荷线。
+
+        Args:
+            path: 输出路径；None 时用默认文件名。
+
+        Returns:
+            None
+        """
         return write_chart_csv(self.inp, self.solution, path)
 
 
 def main(T: int = 24, save_png: bool = False):
-    """跑求解 → 出图。save_png=True 时存 results/设备运行_全系统.png（海南单分区 1 张）。"""
+    """跑求解 → 出图。save_png=True 时存 results/设备运行_全系统.png（海南单分区 1 张）。
+
+    Args:
+        T (int): 时段数。
+        save_png (bool): True 时落盘 PNG。
+
+    Returns:
+        None
+    """
     plt.rcParams["font.family"] = ["Microsoft YaHei"]            # MATLAB 1268 FontName
     plt.rcParams["axes.unicode_minus"] = False
     config.T = T

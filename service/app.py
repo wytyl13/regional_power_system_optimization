@@ -1,7 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-@File    :app.py
+@Time    : 2026/09/29 13:41
+@Author  : weiyutao
+@File    : app.py
+
 FastAPI 服务骨架（docs/服务接口设计方案.md）：
   POST /api/datasets                     上传模版 → datasetId + categories + config + fixedParams
                                          不传 file → 只返回 config + fixedParams（默认配置）
@@ -65,6 +68,11 @@ QUEUE: "queue.Queue[str]" = queue.Queue()
 
 
 def _now() -> str:
+    """当前时刻 → 'YYYY-MM-DD HH:MM:SS' 文本（任务时间戳用）。
+
+    Returns:
+        str: 当前时刻文本。
+    """
     return pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -72,6 +80,15 @@ def _now() -> str:
 
 @app.post("/api/datasets")
 async def upload_dataset(file: Optional[UploadFile] = None):
+    """上传收资模版：解析校验并注册 dataset；不传 file 只回默认配置。
+
+    Args:
+        file (UploadFile | None): 模版 xlsx；None 时只返回 config + fixedParams。
+
+    Returns:
+        dict: datasetId/area/year/categories/config/fixedParams/warnings/excludedUnits
+        （不传 file 时仅 config/fixedParams）。
+    """
     if file is None or not file.filename:      # 不传 file → 只返回基础配置（无模版，无 datasetId）
         return {"config": build_form(merge_config(None), ["平水年", "枯水年"]),
                 "fixedParams": FIXED_PARAMS}
@@ -139,6 +156,14 @@ def dataset_curve(ds_id: str, sheet: str, request: Request):
     """细分表格行点击 → 曲线懒加载。Query 参数 = curve.filterBy 各键的行值
     （前端拿 /api/datasets 下发的 curve 元数据拼 URL，零写死；匹配规则见 tree.py）。
     示例：http://127.0.0.1:8000/api/datasets/<id>/curves/负荷-8760?区域=海南"
+
+    Args:
+        ds_id (str): datasetId。
+        sheet (str): 目标曲线 sheet 名（curve 元数据的 sheet）。
+        request (Request): FastAPI 请求（query 参数即筛选键值）。
+
+    Returns:
+        dict: {columns, rows}（剔除筛选键列）。
     """
     ds = DATASETS.get(ds_id)
     if ds is None:
@@ -154,7 +179,15 @@ class JobRequest(BaseModel):
 
 
 def validate_config(ds: dict, user: dict) -> list[str]:
-    """设计方案 §3 校验清单；返回问题列表（空=通过）。"""
+    """设计方案 §3 校验清单；返回问题列表（空=通过）。
+
+    Args:
+        ds (dict): DATASETS 注册项（year/parsed）。
+        user (dict): 用户 config（未合并的显式键）。
+
+    Returns:
+        list[str]: 问题清单（空 = 通过）。
+    """
     problems: list[str] = []
     cfg = merge_config(user)
     year, p = ds["year"], ds["parsed"]
@@ -194,6 +227,14 @@ def validate_config(ds: dict, user: dict) -> list[str]:
 
 @app.post("/api/jobs")
 def create_job(req: JobRequest):
+    """提交计算：校验通过后入队（串行 worker 逐个求解），返回 jobId。
+
+    Args:
+        req (JobRequest): {datasetId, config}。
+
+    Returns:
+        dict: {"jobId": 任务号}。
+    """
     ds = DATASETS.get(req.datasetId)
     if ds is None:
         raise NotFoundError(f"dataset 不存在: {req.datasetId}")
@@ -212,7 +253,14 @@ def create_job(req: JobRequest):
 # ============ GET 任务列表 / 状态 / 结果 ============
 
 def _job_dir(job_id: str) -> Path | None:
-    """任务号即目录名；防路径穿越，只认 job_ 前缀且不含分隔符。"""
+    """任务号即目录名；防路径穿越，只认 job_ 前缀且不含分隔符。
+
+    Args:
+        job_id (str): 任务号。
+
+    Returns:
+        Path | None: 任务目录；非法或不存在 → None。
+    """
     if not job_id.startswith("job_") or "/" in job_id or "\\" in job_id or ".." in job_id:
         return None
     d = JOBS_DIR / job_id
@@ -222,6 +270,13 @@ def _job_dir(job_id: str) -> Path | None:
 def _disk_summary(job_dir: Path, with_report: bool = False) -> dict:
     """从落盘文件还原任务摘要（服务重启后 JOBS 内存态丢失，以盘为准）。
     interrupted = 目录存在但既无 solution.json 也无 error.log（多为重启打断）。
+
+    Args:
+        job_dir (Path): 任务目录。
+        with_report (bool): True 时附 result.report（历史任务状态页用）。
+
+    Returns:
+        dict: 任务摘要（status ∈ solved/failed/interrupted）。
     """
     job_id = job_dir.name
     try:
@@ -253,6 +308,11 @@ def _disk_summary(job_dir: Path, with_report: bool = False) -> dict:
 
 @app.get("/api/jobs")
 def list_jobs():
+    """任务列表：内存实时态优先、落盘历史补齐，新→旧取前 5 条。
+
+    Returns:
+        dict: {"jobs": [任务摘要, ...]}。
+    """
     jobs = []
     if JOBS_DIR.exists():
         for job_dir in JOBS_DIR.iterdir():
@@ -272,6 +332,14 @@ def list_jobs():
 
 @app.get("/api/jobs/{job_id}")
 def job_status(job_id: str):
+    """单任务状态：内存态优先，重启后的历史任务从盘上还原（含 report）。
+
+    Args:
+        job_id (str): 任务号。
+
+    Returns:
+        dict: 状态体（solved 含 fourItems/report，failed 含 error/userConfig）。
+    """
     job = JOBS.get(job_id)
     if job is None:
         d = _job_dir(job_id)     # 历史任务（重启后内存态丢失），从盘上还原
@@ -294,6 +362,14 @@ def job_status(job_id: str):
 
 @app.get("/api/jobs/{job_id}/results")
 def job_results(job_id: str):
+    """取 solution.json：未解完 → 409，无此任务 → 404。
+
+    Args:
+        job_id (str): 任务号。
+
+    Returns:
+        dict: solution.json 全文。
+    """
     job = JOBS.get(job_id)
     if job is not None:
         path = Path(job["jobDir"]) / "solution.json"
@@ -310,6 +386,15 @@ def job_results(job_id: str):
 # ============ 串行队列 worker（单线程，同时只解一个）============
 
 def _run_job(job_id: str):
+    """执行一个任务：convert 出三份表 → RunConfig 显式接口求解 → 组装 solution.json。
+    任何异常由 _worker 兜底落 failed + error.log。
+
+    Args:
+        job_id (str): 任务号。
+
+    Returns:
+        None
+    """
     job = JOBS[job_id]
     ds = DATASETS[job["datasetId"]]
     job["status"], job["startedAt"] = "running", _now()
@@ -371,6 +456,11 @@ def _run_job(job_id: str):
 
 
 def _worker():
+    """串行队列消费线程：逐个取任务执行，异常不崩线程。
+
+    Returns:
+        None
+    """
     while True:
         job_id = QUEUE.get()
         job = JOBS.get(job_id)

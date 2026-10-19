@@ -49,6 +49,15 @@ class SystemVars:
 
 
 def add_vars(m: gp.Model, inp: Inputs) -> SystemVars:
+    """创建系统层决策变量（MATLAB 2.6-2.13 变量 + 抽发互斥约束）。
+
+    Args:
+        m (gp.Model): Gurobi 模型。
+        inp (Inputs): 系统公共输入。
+
+    Returns:
+        SystemVars: 系统层决策变量容器。
+    """
     Narea, T = inp.areas.Narea, inp.time.T
     INF = gp.GRB.INFINITY
     P_wind      = m.addMVar((Narea, T), lb=-INF, name="P_wind")              # MATLAB 629
@@ -74,7 +83,16 @@ def add_vars(m: gp.Model, inp: Inputs) -> SystemVars:
 
 
 def _area_agg(arr_rows: np.ndarray, n_col: int, Narea: int):
-    """机组→分区聚合矩阵：rows 是 0 基分区索引。返回 scipy 稀疏 (Narea, n_col)。"""
+    """机组→分区聚合矩阵：rows 是 0 基分区索引。返回 scipy 稀疏 (Narea, n_col)。
+
+    Args:
+        arr_rows (np.ndarray): 各机组的 0 基分区索引。
+        n_col (int): 机组数（聚合矩阵列数）。
+        Narea (int): 分区数。
+
+    Returns:
+        sp.csr_matrix: 机组→分区聚合矩阵 (Narea, n_col)。
+    """
     return sp.csr_matrix((np.ones(len(arr_rows)), (arr_rows, np.arange(len(arr_rows)))),
                          shape=(Narea, len(arr_rows)))
 
@@ -82,18 +100,56 @@ def _area_agg(arr_rows: np.ndarray, n_col: int, Narea: int):
 def _amul(A, P):
     """A @ P 的零维安全版：机组数 0 时空聚合得 0。
     MATLAB 稀疏 (Narea,0)@(0,T) 自然得 0；gurobipy 的 MVar 矩阵乘在此断言报错，
-    故 N=0 时直接返回标量 0（P_G/P_sto 等求和不受影响）。"""
+    故 N=0 时直接返回标量 0（P_G/P_sto 等求和不受影响）。
+
+    Args:
+        A: 稀疏聚合矩阵 (Narea, n)。
+        P: 变量矩阵 (n, T) 或表达式。
+
+    Returns:
+        A @ P 聚合表达式；n=0 时返回标量 0。
+    """
     return A @ P if A.shape[1] else 0
 
 
 def _scatter(edges: int, rows: np.ndarray, T: int):
-    """边→小时散射矩阵 (edges, T)：边 e 计入其起点小时 rows[e]。"""
+    """边→小时散射矩阵 (edges, T)：边 e 计入其起点小时 rows[e]。
+
+    Args:
+        edges (int): 转移边数。
+        rows (np.ndarray): 各边的起点小时序号。
+        T (int): 时段数。
+
+    Returns:
+        sp.csr_matrix: 边→小时散射矩阵 (edges, T)。
+    """
     return sp.csr_matrix((np.ones(edges), (np.arange(edges), rows)), shape=(edges, T))
 
 
 def add_constraints(m: gp.Model, inp: Inputs, sysv: SystemVars,
                     units: RegisteredUnits, coal, gas, nuc, bio, ps, es, hyd, fr,
                     csp) -> None:
+    """对照 MATLAB 3.12-3.18 添加系统层全局约束：风光平衡/断面/需求响应/
+    功率平衡/新能源利用率/CO2 省级上限/周备用。
+
+    Args:
+        m (gp.Model): Gurobi 模型。
+        inp (Inputs): 系统公共输入。
+        sysv (SystemVars): 系统层决策变量。
+        units (RegisteredUnits): 各电源决策变量注册表。
+        coal (CoalInputs): 煤电输入。
+        gas (GasInputs): 气电输入。
+        nuc (NuclearInputs): 核电输入。
+        bio (BiomassInputs): 生物质输入。
+        ps (PSInputs): 抽蓄输入。
+        es (ESInputs): 电储能输入。
+        hyd (HydInputs): 水电输入。
+        fr (FrInputs): 友好电站输入。
+        csp (CspInputs): 光热输入。
+
+    Returns:
+        None
+    """
     Narea, T, Np = inp.areas.Narea, inp.time.T, inp.areas.Nprovince
     INF = gp.GRB.INFINITY
     # ---- 3.7/3.8：风、光（可用=出力+弃；煤电单测中可用=0 → 全被钉成 0）----
@@ -212,7 +268,15 @@ def add_constraints(m: gp.Model, inp: Inputs, sysv: SystemVars,
 
 def _line_net(inp: Inputs, sysv: SystemVars):
     """省内断面净受入 P_tr = A_line·P_line（MATLAB 934；送端-1 受端+1）。
-    N_line=0 时 A_line 为 (Narea,0)，走 _amul 零维安全（MATLAB 稀疏乘自然为 0）。"""
+    N_line=0 时 A_line 为 (Narea,0)，走 _amul 零维安全（MATLAB 稀疏乘自然为 0）。
+
+    Args:
+        inp (Inputs): 系统公共输入。
+        sysv (SystemVars): 系统层决策变量。
+
+    Returns:
+        各分区净受入表达式（Narea×T；N_line=0 时为标量 0）。
+    """
     Nl, Narea = inp.lines.N_line, inp.areas.Narea
     rows = np.concatenate([inp.lines.line_from, inp.lines.line_to])
     cols = np.concatenate([np.arange(Nl), np.arange(Nl)])

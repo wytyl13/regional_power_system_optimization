@@ -1,7 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
+@Time    : 2026/09/29 13:41
+@Author  : weiyutao
 @File    : test_convert.py
+
 转换器回归：convert(数据模版-海南(1).xlsx, 默认config) vs 人工三份表，
 逐 sheet、逐列、逐值比对。比对范围 = 转换器生成的全部 sheet（即 reader/model
 实际读取范围；说明类 sheet 不生成、不比对）。
@@ -40,6 +43,15 @@ MAX_REPORT = 400
 
 
 def _eq(a, b) -> bool:
+    """单值等价判据：NaN==NaN、数值走容差（rel 1e-9 / abs 1e-6）、其余 ==。
+
+    Args:
+        a: 人工表值。
+        b: 转换器产出值。
+
+    Returns:
+        bool: 等价与否。
+    """
     if a is None and b is None:
         return True
     if (isinstance(a, numbers.Real) and isinstance(b, numbers.Real)
@@ -56,6 +68,17 @@ def _eq(a, b) -> bool:
 
 
 def compare(gt_path: Path, my_path: Path, sheets: list[str], diffs: list[str]):
+    """逐 sheet 比对两份 xlsx：表头/行数/逐值，差异写入 diffs。
+
+    Args:
+        gt_path (Path): 人工基准表路径。
+        my_path (Path): 转换器产出表路径。
+        sheets (list[str]): 参与比对的 sheet 名。
+        diffs (list[str]): 差异清单（就地追加，上限 MAX_REPORT 条）。
+
+    Returns:
+        None
+    """
     for sheet in sheets:
         gt = pd.read_excel(gt_path, sheet_name=sheet)
         mine = pd.read_excel(my_path, sheet_name=sheet)
@@ -83,6 +106,11 @@ def compare(gt_path: Path, my_path: Path, sheets: list[str], diffs: list[str]):
 
 
 def main():
+    """跑转换器并比对人工三份表，落回归报告。
+
+    Returns:
+        int: 0 = 零差异，1 = 有差异。
+    """
     parsed = parse_template(str(TPL))
     summary = convert(parsed, None, OUT)
     diffs: list[str] = []

@@ -21,7 +21,16 @@ import config
 
 
 def _read(path, sheet, required):
-    """读一个 sheet 并核对表头；缺列即报错。数据审查不做、不补值。"""
+    """读一个 sheet 并核对表头；缺列即报错。数据审查不做、不补值。
+
+    Args:
+        path: Excel 文件路径（Path）。
+        sheet: sheet 名。
+        required: 必须存在的列名清单。
+
+    Returns:
+        pd.DataFrame: 该 sheet 的原始表。
+    """
     df = pd.read_excel(path, sheet_name=sheet)
     missing = [c for c in required if c not in df.columns]
     if missing:
@@ -30,7 +39,14 @@ def _read(path, sheet, required):
 
 
 def _zstr(v):
-    """分区编号统一成字符串：Excel 里 1（数字）与 '1'（文本）是同一分区。"""
+    """分区编号统一成字符串：Excel 里 1（数字）与 '1'（文本）是同一分区。
+
+    Args:
+        v: 原始单元格值。
+
+    Returns:
+        str: 统一后的分区编号字符串。
+    """
     if isinstance(v, (int, float, np.integer, np.floating)) and float(v) == int(v):
         return str(int(v))
     return str(v)
@@ -38,7 +54,14 @@ def _zstr(v):
 
 def _to_hours(s: pd.Series) -> pd.Series:
     """Excel 时间 → datetime；数字按 Excel 日期序列换算 → 舍入到最近整点。
-    对应 MATLAB 82-85、277-288 行的 datetime/ConvertFrom + dateshift。"""
+    对应 MATLAB 82-85、277-288 行的 datetime/ConvertFrom + dateshift。
+
+    Args:
+        s (pd.Series): 原始时间列（datetime 或 Excel 日期序列数）。
+
+    Returns:
+        pd.Series: 舍入到整点的 datetime 序列。
+    """
     if pd.api.types.is_numeric_dtype(s):
         s = pd.to_datetime(s, unit="D", origin="1899-12-30")
     else:
@@ -47,7 +70,16 @@ def _to_hours(s: pd.Series) -> pd.Series:
 
 
 def _match_rows(sheet_time: pd.Series, want: pd.DatetimeIndex, what: str) -> np.ndarray:
-    """MATLAB ismember(Time, xxxTime)：按整点时刻找行号；缺时刻即报错。"""
+    """MATLAB ismember(Time, xxxTime)：按整点时刻找行号；缺时刻即报错。
+
+    Args:
+        sheet_time (pd.Series): 数据表时间列（整点 datetime）。
+        want (pd.DatetimeIndex): 要匹配的时刻序列。
+        what (str): 报错时点名用的表名。
+
+    Returns:
+        np.ndarray: want 各时刻在表中的行号。
+    """
     pos = {ts: i for i, ts in enumerate(sheet_time)}
     try:
         return np.array([pos[t] for t in want])
@@ -172,7 +204,11 @@ class InputReader:
     # ---- 1.1 时间轴 ----
     def load_time(self) -> TimeAxis:
         """读时间配置，返回时间轴：步数 T、步长 Delta_t、整点时刻序列
-        Time、去重日期表 Day 与天数 Nday。"""
+        Time、去重日期表 Day 与天数 Nday。
+
+        Returns:
+            TimeAxis: 时间轴（1.1）。
+        """
         T = config.T
         Delta_t = float(config.DELTA_T)  # 单位长度，即1小时
         Time = pd.date_range(pd.Timestamp(config.START_TIME), periods=T, freq="h")
@@ -185,7 +221,14 @@ class InputReader:
     def load_heating_calendar(self, time: TimeAxis) -> HeatingCalendar:
         """读供暖期设置表并按时间轴展开，返回供暖日历：分区清单 ZoneID、
         分区×T 供暖标记 isHeatingPeriod（起始月日晚于结束月日表示跨年，
-        取两段并集；Enabled=0 的行全年 False）。"""
+        取两段并集；Enabled=0 的行全年 False）。
+
+        Args:
+            time (TimeAxis): 时间轴。
+
+        Returns:
+            HeatingCalendar: 供暖日历。
+        """
         hd = _read(config.UNIT_FILE, "供暖期设置",
                    ["ZoneID", "Enabled", "StartMonth", "StartDay", "EndMonth", "EndDay"])
         ZoneID = [_zstr(v) for v in hd["ZoneID"]]
@@ -209,6 +252,12 @@ class InputReader:
         读系统参数表，返回经济参数：货币折算系数 costScale、固定费用
         折算 fixedCostPeriodRatio/fixedCostScale、失负荷与弃电惩罚、
         四项排放价格（CO2/SO2/NOx/烟尘）。
+
+        Args:
+            time (TimeAxis): 时间轴（折算本周期小时数用）。
+
+        Returns:
+            EconomicParams: 系统经济参数。
         """
         sd = _read(config.SYSTEM_FILE, "系统参数", ["Parameter", "Value"])
         p = dict(zip(sd["Parameter"], sd["Value"]))
@@ -255,6 +304,9 @@ class InputReader:
         """
         读分区表，返回分区信息：分区编号/名称清单、分区→省序映射
         areaProvince、省清单 ProvinceID（areaPos 供下游分区号定位）。
+
+        Returns:
+            Areas: 分区信息。
         """
         areaData = _read(config.UNIT_FILE, "分区表", ["AreaID", "AreaName", "ProvinceID"])
         ProvinceID = list(dict.fromkeys(areaData["ProvinceID"].astype(str)))  # unique stable
@@ -273,7 +325,11 @@ class InputReader:
     # ---- 检修计划（MATLAB 79-85）：多电源共用一张表，骨架层读取、各电源文件按 Type 领取 ----
     def load_maintenance(self) -> pd.DataFrame:
         """读检修计划总表，返回启用行 DataFrame：各机组的检修起止时间
-        （各电源文件按 Type 领取）。"""
+        （各电源文件按 Type 领取）。
+
+        Returns:
+            pd.DataFrame: 检修计划启用行（Type/UnitKey/StartTime/EndTime）。
+        """
         # 主要包含：各个机组的检修起始和结束时间节点
         mtn = _read(config.UNIT_FILE, "检修计划",
                     ["Type", "UnitKey", "StartTime", "EndTime", "Enabled"])
@@ -286,7 +342,15 @@ class InputReader:
     def load_wind_pv_capacity(self, econ: EconomicParams, areas: Areas) -> WindPv:
         """读风电/光伏装机表，返回风光装机：分区归属 area_wind/area_pv、
         装机容量 W_capacity/PV_capacity、折算到本周期的 FOM 成本
-        c_wind_FOM/c_pv_FOM。"""
+        c_wind_FOM/c_pv_FOM。
+
+        Args:
+            econ (EconomicParams): 系统经济参数（FOM 折算用）。
+            areas (Areas): 分区信息。
+
+        Returns:
+            WindPv: 风光装机。
+        """
         # 主要包含：风电装机容量、风电周期运维成本、光伏装机容量（MW）、光伏周期运维成本（元）
         req_w = ["分区编号", "分区名称", "装机容量_MW", "FOM_COST_PERIOD"]
         windData = _read(config.UNIT_FILE, "风电", req_w)
@@ -316,7 +380,16 @@ class InputReader:
     def load_profiles(self, time: TimeAxis, areas: Areas, wind_pv: WindPv) -> Profiles:
         """读负荷/风光曲线与归一化基准，返回分区曲线：逐时负荷/风电/光伏
         功率矩阵 P_load/P_wind_available/P_pv_available（loadData/loadTime/
-        baseMap 为原始表，供 1.22 周峰值复用）。"""
+        baseMap 为原始表，供 1.22 周峰值复用）。
+
+        Args:
+            time (TimeAxis): 时间轴。
+            areas (Areas): 分区信息。
+            wind_pv (WindPv): 风光装机（可用出力按装机折算）。
+
+        Returns:
+            Profiles: 分区曲线。
+        """
         loadData = _read(config.PROFILE_FILE, "负荷", ["时间"] + areas.AreaName)
         loadTime = _to_hours(loadData["时间"])
         loadRows = _match_rows(loadTime, time.Time, "负荷")
@@ -360,7 +433,14 @@ class InputReader:
     # ---- 1.13 省内断面（MATLAB 332-342）----
     def load_lines(self, areas: Areas) -> Lines:
         """读省内断面表，返回断面信息：启用条数 N_line、端点分区序
-        line_from/line_to、送/受电功率上限 P_line_forward/P_line_reverse。"""
+        line_from/line_to、送/受电功率上限 P_line_forward/P_line_reverse。
+
+        Args:
+            areas (Areas): 分区信息。
+
+        Returns:
+            Lines: 省内断面。
+        """
         # 即送受电：送电功率上限 (ForwardMW)，受电功率上限 (ReverseMW)
         lineData = _read(config.SYSTEM_FILE, "省内断面",
                          ["FromArea", "ToArea", "ForwardMW", "ReverseMW", "Enabled"])
@@ -383,7 +463,14 @@ class InputReader:
     def load_province_constraints(self, areas: Areas) -> ProvinceConstraints:
         """读省级约束表，返回省级参数：充裕度 adequacyFactor、冷/热备用
         比例、新能源利用率下限、碳预算 CO2Limit、备用持续时间
-        reserveDuration（均按省序对齐）。"""
+        reserveDuration（均按省序对齐）。
+
+        Args:
+            areas (Areas): 分区信息（省清单与省序对齐用）。
+
+        Returns:
+            ProvinceConstraints: 省级参数。
+        """
         """
         AdequacyFactor: 容量充裕度系数（系统在第 w 周的最小备用容量需求公式为 (AdequacyFactor - 1) × 该周系统最大负荷，各调度时段的系统总备用容量必须大于等于该下限）
         ColdReserveRatio：冷备用比例（冷备用由停运且具备启动条件的煤电和气电提供，冷备用至少达到该周最大负荷的特定比例）
@@ -413,7 +500,15 @@ class InputReader:
         """读分区负荷参数与需求响应时序/日限额表，返回需求响应：失负荷/
         转移/削减参数（比例、窗口、成本）、逐时限额矩阵 P_shift_out_max/
         P_shift_in_max/P_cut_max、逐日削减电量上限 E_cut_day_max 与同日
-        转移边端点 shiftFrom/shiftTo。"""
+        转移边端点 shiftFrom/shiftTo。
+
+        Args:
+            time (TimeAxis): 时间轴。
+            areas (Areas): 分区信息。
+
+        Returns:
+            DemandResponse: 分区负荷参数 + 需求响应。
+        """
         """
         ShedMaxRatio：失负荷比例（当系统遇到极端情况，怎么凑也发不出足够的电时，最多允许停掉百分之几的用电需求）
         ShiftWindow_h：可转移负荷允许的最大时间转移范围（规定了最多能让人提前或推迟几个小时用电）
@@ -491,7 +586,16 @@ class InputReader:
     # ---- 1.22 每周负荷峰值（MATLAB 551-565；窗口按数据实际行截取）----
     def load_week_peak(self, time: TimeAxis, areas: Areas, profiles: Profiles) -> np.ndarray:
         """按省聚合分区负荷并逐周取峰值，返回周负荷峰值矩阵 P_week_peak
-        （Nprovince×T，每省每周一个峰值）。"""
+        （Nprovince×T，每省每周一个峰值）。
+
+        Args:
+            time (TimeAxis): 时间轴。
+            areas (Areas): 分区信息。
+            profiles (Profiles): 分区曲线（负荷原始表复用）。
+
+        Returns:
+            np.ndarray: 周负荷峰值（Nprovince×T，MW）。
+        """
         weekStart = time.Time.normalize() - pd.to_timedelta(time.Time.dayofweek, unit="D")  # 周一起始
         Week = list(dict.fromkeys(weekStart))
         P_week_peak = np.zeros((areas.Nprovince, time.T))
@@ -509,7 +613,11 @@ class InputReader:
         return P_week_peak
 
     def load(self) -> Inputs:
-        """按依赖顺序执行各 load_x 方法，数值安全检查后组装组合式 Inputs。"""
+        """按依赖顺序执行各 load_x 方法，数值安全检查后组装组合式 Inputs。
+
+        Returns:
+            Inputs: 系统公共输入组合体。
+        """
         time = self.load_time()                                # 时间轴
         heating = self.load_heating_calendar(time)             # 供暖日历
         econ = self.load_economic_params(time)                 # 系统经济参数
@@ -537,11 +645,22 @@ class InputReader:
 
 
 def load_inputs() -> Inputs:
-    """模块级入口：构造 InputReader 并执行完整读取，返回 Inputs。"""
+    """模块级入口：构造 InputReader 并执行完整读取，返回 Inputs。
+
+    Returns:
+        Inputs: 系统公共输入组合体。
+    """
     return InputReader().load()
 
 def _flatten(inp: Inputs) -> dict:
-    """组合式 Inputs → 扁平字段字典（节次字段名与旧版 Inputs 一致）。"""
+    """组合式 Inputs → 扁平字段字典（节次字段名与旧版 Inputs 一致）。
+
+    Args:
+        inp (Inputs): 系统公共输入组合体。
+
+    Returns:
+        dict: 扁平字段字典（键=叶级字段名）。
+    """
     flat = {}
     for name in ("time", "heating", "econ", "areas", "wind_pv", "profiles", "lines", "prov", "dr"):
         section = getattr(inp, name)

@@ -5,24 +5,22 @@
 @Author  : weiyutao
 @File    : main.py
 入口：改 T 在 config.py；结果核对走 solve.solve 的四项打印。
+2026-10-19 双入口归一：读数/求解/结果.json 收口到 run.py（run_with_outputs），
+本文件只补命令行全量出口的增量件（PNG / 图 CSV / 分析八件套）。
 """
 import time
 
 import config
-import power_opt.reader as reader
-from solve import solve
-from solution import write_result_json
+from run import RunConfig, run_with_outputs
 
 
 if __name__ == "__main__":
     t0 = time.perf_counter()
-    inp = reader.load_inputs()
-    solution = solve(inp)
+    solution, inp = run_with_outputs(RunConfig())
     if solution.four_items["objective"]["value"] is not None:
         from analysis_export import AnalysisExport
         ae = AnalysisExport(inp, solution)
         metrics = ae.metrics()
-        write_result_json(inp, solution, metrics)
         import plot as PL
         PL.plt.rcParams["font.family"] = ["Microsoft YaHei"]
         PL.plt.rcParams["axes.unicode_minus"] = False

@@ -27,10 +27,26 @@ import numpy as np
 
 
 def _values(mvar: gp.MVar) -> np.ndarray:
+    """取 MVar 解值（float 矩阵）。
+
+    Args:
+        mvar (gp.MVar): 已求解的决策变量矩阵。
+
+    Returns:
+        np.ndarray: 同形状解值数组。
+    """
     return np.asarray(mvar.X)
 
 
 def _integers(mvar: gp.MVar) -> np.ndarray:
+    """取 MVar 解值并四舍五入成 int（0/1 状态变量）。
+
+    Args:
+        mvar (gp.MVar): 已求解的 0/1 决策变量矩阵。
+
+    Returns:
+        np.ndarray: 同形状 int 数组。
+    """
     return np.rint(_values(mvar)).astype(int)
 
 
@@ -52,6 +68,9 @@ class Solution:
             insts (list): UNITS 序单元实例（inst.inputs 输入、inst.vars 变量句柄）。
             sv (SystemVars): 系统层决策变量容器。
             cost_exprs (dict): add_objective 返回的成本表达式。
+
+        Returns:
+            None
         """
         self.inp = inp                   # to_timeseries_csv 用；下游勿再改
         four_items = {
@@ -213,18 +232,30 @@ class Solution:
 
     @property
     def nuclear_available(self) -> np.ndarray:
-        """核电可运行状态（第四章：1 − 检修标记 m_nuc，逐台×T）。"""
+        """核电可运行状态（第四章：1 − 检修标记 m_nuc，逐台×T）。
+
+        Returns:
+            np.ndarray: 逐台×T 可运行标记（1 可运行、0 检修）。
+        """
         return 1 - np.asarray(self.units["nuclear"]["maintenance"]).astype(int)
 
     @property
     def friendly_output(self) -> np.ndarray:
-        """友好站对外出力（第四章：风直送+光直送+放电，逐站×T）。"""
+        """友好站对外出力（第四章：风直送+光直送+放电，逐站×T）。
+
+        Returns:
+            np.ndarray: 逐站×T 对外出力，MW。
+        """
         V = self.values
         return (V["P_fr_wind_out"] + V["P_fr_pv_out"] + V["P_fr_discharge"])
 
     @property
     def area_line_flow(self) -> np.ndarray:
-        """断面分区总送受（第四章：A_line @ P_line，受入正/送出负，分区×T）。"""
+        """断面分区总送受（第四章：A_line @ P_line，受入正/送出负，分区×T）。
+
+        Returns:
+            np.ndarray: 分区×T 断面净送受，MW。
+        """
         F = self.inputs_fields
         A_line = np.zeros((F["Narea"], F["N_line"]))
         A_line[F["line_from"], np.arange(F["N_line"])] = -1
@@ -233,7 +264,11 @@ class Solution:
 
     @property
     def storage_equivalent_cycles(self) -> dict:
-        """储能放电侧等效循环（第四章：放电量/额定能量，逐台，按储能三类分组）。"""
+        """储能放电侧等效循环（第四章：放电量/额定能量，逐台，按储能三类分组）。
+
+        Returns:
+            dict: {储能类别: 逐台等效循环次数列表}。
+        """
         dt = self.inputs_fields["Delta_t"]
         out = {}
         for group, dis_key in (("pumped_storage", "P_ps_gen"),
@@ -247,6 +282,11 @@ class Solution:
     # ---- 对拍件（compare.py 硬依赖；列集=第四章输出展开，列序冻结勿动）----
 
     def to_timeseries_csv(self) -> None:
+        """导出对拍用时序 CSV（RESULT_DIR/时序结果_T{T}.csv；列集与列序冻结）。
+
+        Returns:
+            None
+        """
         values = self.values
         units = self.units
         inp = self.inp
@@ -315,6 +355,14 @@ def write_result_json(inp, solution: Solution, metrics: dict) -> None:
     只含 meta + four_items + costs + metrics 标量；前端 report/positionChart/
     series/labels 已移 service 组装（series/labels 舍弃）。compare.py 的 Python 侧
     objective 自 four_items 读、参考指标自 metrics 读（2026-10-16 裁决）。
+
+    Args:
+        inp (Inputs): 系统公共输入（meta 段用）。
+        solution (Solution): 求解结果。
+        metrics (dict): AnalysisExport.metrics() 的指标字典。
+
+    Returns:
+        None
     """
     import config
     doc = {
@@ -325,7 +373,7 @@ def write_result_json(inp, solution: Solution, metrics: dict) -> None:
             "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         },
         "four_items": solution.four_items,      # 含 scenario 无关的求解四项
-        "costs": solution.costs,                # 成本分项（六表取值用；恒等式见 test_algrithm）
+        "costs": solution.costs,                # 成本分项（六表取值用；恒等式见 test_algorithm）
         "metrics": {                            # AnalysisExport.metrics 的标量（report 同名）
             "balanceErrorMW": metrics["balanceErrorMW"],
             "renewableUtilization": [float(x) for x in metrics["renewableUtilization"]],

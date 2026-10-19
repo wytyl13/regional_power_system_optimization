@@ -37,7 +37,14 @@ VARS_SORTED = sorted(VARS, key=len, reverse=True)
 
 
 def _var_of(col: str) -> str:
-    """列名 → 变量名（剥掉 _机组编号/_分区号 后缀）。"""
+    """列名 → 变量名（剥掉 _机组编号/_分区号 后缀）。
+
+    Args:
+        col (str): 时序 CSV 的列名。
+
+    Returns:
+        str: 该列所属的变量名（VARS 之一；不属于任何变量时抛 KeyError）。
+    """
     for v in VARS_SORTED:
         if col == v or col.startswith(v + "_"):
             return v
@@ -45,6 +52,14 @@ def _var_of(col: str) -> str:
 
 
 def _latest(pattern) -> str:
+    """按字典序取 glob 匹配中最新的一个（时间戳目录名字典序=时间序）。
+
+    Args:
+        pattern: glob 通配模式（Path 或 str）。
+
+    Returns:
+        str: 最新一条匹配路径；无匹配抛 FileNotFoundError。
+    """
     hits = sorted(glob.glob(str(pattern)))
     if not hits:
         raise FileNotFoundError(f"找不到 {pattern}（先跑对应侧求解）")
@@ -52,6 +67,15 @@ def _latest(pattern) -> str:
 
 
 def run(T: int, obj_ref: float | None = None):
+    """对拍 MATLAB 与 Python 各自最新一轮求解的时序结果（两段式判定）。
+
+    Args:
+        T (int): 时段数（定位两边 T{T}_gap* 结果目录）。
+        obj_ref (float | None): MATLAB 目标值参考；None 时从 .mat 的 report.objectiveYuan 读。
+
+    Returns:
+        None
+    """
     mat_dir = _latest(config.MATLAB_DIR / "results" / f"T{T}_gap*")
     py_dir = _latest(config.RESULT_DIR / f"T{T}_gap*")
     print("MATLAB 目录:", mat_dir)

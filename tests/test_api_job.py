@@ -1,6 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""接口测试 2/2：上传模版 → 提交计算 → 轮询到 solved → 结果写入本地 JSON。
+"""
+@Time    : 2026/10/13 08:36
+@Author  : weiyutao
+@File    : test_api_job.py
+
+接口测试 2/2：上传模版 → 提交计算 → 轮询到 solved → 结果写入本地 JSON。
 
 用法（项目根目录）：
     python tests/test_api_job.py <模版.xlsx> [小时数] [输出.json]
@@ -21,6 +26,15 @@ DEFAULT_XLSX = HERE.parent / "海南2030算例_20261012" / "数据模版-海南.
 
 
 def post(path: str, payload: dict) -> dict:
+    """POST JSON 并解析响应（标准库 urllib）。
+
+    Args:
+        path (str): API 路径（不含 BASE）。
+        payload (dict): 请求体。
+
+    Returns:
+        dict: 响应 JSON。
+    """
     req = urllib.request.Request(
         BASE + path, data=json.dumps(payload).encode("utf-8"), method="POST",
         headers={"Content-Type": "application/json"})
@@ -29,12 +43,27 @@ def post(path: str, payload: dict) -> dict:
 
 
 def get(path: str) -> dict:
+    """GET 并解析响应。
+
+    Args:
+        path (str): API 路径（不含 BASE）。
+
+    Returns:
+        dict: 响应 JSON。
+    """
     with urllib.request.urlopen(BASE + path, timeout=60) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
 def upload_dataset(xlsx: Path) -> str:
-    """multipart 手工拼装（标准库，无 requests 依赖）。"""
+    """multipart 手工拼装（标准库，无 requests 依赖）。
+
+    Args:
+        xlsx (Path): 模版文件路径。
+
+    Returns:
+        str: datasetId。
+    """
     boundary = "----" + uuid.uuid4().hex
     body = (
         f"--{boundary}\r\n"
@@ -50,6 +79,11 @@ def upload_dataset(xlsx: Path) -> str:
 
 
 def main() -> int:
+    """上传模版 → 提交计算 → 轮询到终态 → 四项核对 + views 契约断言 → 落盘结果。
+
+    Returns:
+        int: 0 = PASS，1 = 失败。
+    """
     xlsx = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_XLSX
     hours = int(sys.argv[2]) if len(sys.argv) > 2 else 24
     out_path = Path(sys.argv[3]) if len(sys.argv) > 3 \

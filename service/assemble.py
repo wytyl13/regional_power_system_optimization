@@ -1,4 +1,11 @@
-"""service → power_opt 的转发（power_opt 路径注入收口在此，避免双份实现）。
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+@Time    : 2026/10/13 08:36
+@Author  : weiyutao
+@File    : assemble.py
+
+service → power_opt 的转发（power_opt 路径注入收口在此，避免双份实现）。
 v2（2026-10-16）：导出 AnalysisExport 类（metrics/五表/views/export）替代
 原 build_analysis/build_views 函数；服务侧自建实例，不再读 结果.json。"""
 

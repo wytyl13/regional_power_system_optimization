@@ -1,7 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
+@Time    : 2026/09/29 13:41
+@Author  : weiyutao
 @File    : parse_template.py
+
 解析收资模版（数据模版-*.xlsx，23 个 sheet）→ 纯结构化数据。
 只提取不换算：单位换算、机组筛选、派生计算全部在 convert.py。
 缺 sheet / 缺列 / 缺曲线行 → ValueError，不造数。
@@ -22,12 +25,30 @@ COL_ALIAS = {
 
 
 def _load(path):
+    """只读方式打开模版工作簿（data_only 取公式计算值）。
+
+    Args:
+        path: 模版文件路径。
+
+    Returns:
+        Workbook: openpyxl 工作簿（调用方负责 close）。
+    """
     return openpyxl.load_workbook(path, read_only=True, data_only=True)
 
 
 def _rows(wb, sheet, required_cols, key_col=None):
     """按表头名取列，返回 [ {列名: 值}, ... ]。跳过全空行；
-    给 key_col 时只留该列非空的行（滤掉表尾的单位/说明行）。"""
+    给 key_col 时只留该列非空的行（滤掉表尾的单位/说明行）。
+
+    Args:
+        wb (Workbook): 模版工作簿。
+        sheet (str): sheet 名。
+        required_cols (list[str]): 必需列名（缺列 → ValueError）。
+        key_col (str | None): 主键列名；给定时该列为空的行被跳过。
+
+    Returns:
+        list[dict]: 行列表（键 = 列名）。
+    """
     if sheet not in wb.sheetnames:
         raise ValueError(f"模版缺 sheet: [{sheet}]")
     ws = wb[sheet]
@@ -57,7 +78,16 @@ def _rows(wb, sheet, required_cols, key_col=None):
 
 
 def _curves(wb, sheet, station_col):
-    """8760 曲线 sheet → {(电站名称, 日期str): [24 float]}。"""
+    """8760 曲线 sheet → {(电站名称, 日期str): [24 float]}。
+
+    Args:
+        wb (Workbook): 模版工作簿。
+        sheet (str): 曲线 sheet 名。
+        station_col (str): 电站名称列名。
+
+    Returns:
+        dict: {(电站名称, 日期str): [24 个小时值]}。
+    """
     rows = _rows(wb, sheet, ["日期"] + HOURS + [station_col])
     out = {}
     for r in rows:
@@ -66,7 +96,14 @@ def _curves(wb, sheet, station_col):
 
 
 def parse_template(path) -> dict:
-    """解析模版，返回结构化 dict。year 取自负荷表年度。"""
+    """解析模版，返回结构化 dict。year 取自负荷表年度。
+
+    Args:
+        path: 模版文件路径。
+
+    Returns:
+        dict: 结构化结果（负荷/备用/机组/曲线/检修等键，原始口径不换算）。
+    """
     wb = _load(path)
     try:
         return _parse(wb)
@@ -75,6 +112,14 @@ def parse_template(path) -> dict:
 
 
 def _parse(wb) -> dict:
+    """逐 sheet 提取结构化数据（只提取不换算；缺 sheet/列/行 → ValueError）。
+
+    Args:
+        wb (Workbook): 模版工作簿。
+
+    Returns:
+        dict: 结构化结果（area/year/负荷/备用/需求响应/机组/检修/曲线等键）。
+    """
     # ---- 负荷/年度 ----
     load = _rows(wb, "负荷", ["区域", "年度", "最大负荷", "用电量"], key_col="年度")
     if len(load) != 1:

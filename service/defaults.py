@@ -1,7 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
+@Time    : 2026/09/29 13:41
+@Author  : weiyutao
 @File    : defaults.py
+
 默认配置（= 海南2030算例已验证基线）。config 表单块由本文件生成（build_form）；
 用户 config 与其深合并后生效，取值优先级：用户显式传入 > Excel 收资值 > 本默认。
 所有值的来源见 docs/服务接口设计方案.md §2.2 与 service/ground_truth.txt。
@@ -253,10 +256,26 @@ FIELDS_MAPPING = {
 
 
 def merge_config(user: dict | None) -> dict:
-    """用户 config 深合并到默认值上（只覆盖显式给出的键）。"""
+    """用户 config 深合并到默认值上（只覆盖显式给出的键）。
+
+    Args:
+        user (dict | None): 用户 config；None 全用默认。
+
+    Returns:
+        dict: 生效配置（深拷贝，改它不污染 DEFAULT_CONFIG）。
+    """
     cfg = copy.deepcopy(DEFAULT_CONFIG)
 
     def _merge(base, over):
+        """递归深合并：两侧同为 dict 的键下钻，其余值整体覆盖。
+
+        Args:
+            base (dict): 合并目标（就地修改）。
+            over (dict): 覆盖值来源。
+
+        Returns:
+            None
+        """
         for k, v in over.items():
             if isinstance(v, dict) and isinstance(base.get(k), dict):
                 _merge(base[k], v)
@@ -293,7 +312,15 @@ FIXED_PARAMS = [
 def build_form(defaults: dict, hydrology: list) -> dict:
     """配置默认值 + 字段标签 → /api/datasets 的 config 表单块
     {组:{键:{label, value, options?}}}。wire 格式不变：提交计算时前端只回
-    {组:{键:值}}（POST /api/jobs 原契约），label/options 剥掉不回传。"""
+    {组:{键:值}}（POST /api/jobs 原契约），label/options 剥掉不回传。
+
+    Args:
+        defaults (dict): 生效配置（merge_config 产物，可含收资浮出值）。
+        hydrology (list[str]): 水文情景枚举（模版实际曲线）。
+
+    Returns:
+        dict: config 表单块。
+    """
     form = {}
     for g, kv in defaults.items():
         form[g] = {k: {"label": FIELDS_MAPPING.get(f"{g}.{k}", f"{g}.{k}"), "value": v}

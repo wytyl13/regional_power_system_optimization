@@ -47,7 +47,14 @@ class RunConfig:
 
 
 def _apply(cfg: RunConfig) -> None:
-    """RunConfig → config 模块属性（只改显式给出的字段）。"""
+    """RunConfig → config 模块属性（只改显式给出的字段）。
+
+    Args:
+        cfg (RunConfig): 一次求解的可变参数（None 字段跳过不改）。
+
+    Returns:
+        None
+    """
     if cfg.unit_file is not None:
         config.UNIT_FILE = Path(cfg.unit_file)
     if cfg.system_file is not None:
@@ -79,6 +86,12 @@ def run(cfg: RunConfig) -> Solution:
 
     结果落盘位置：solve() 会把 config.RESULT_DIR 再指到其下
     T{T}_gap{MIGAP}_{时间戳} 子目录并写 csv/log；该子目录可用 last_result_dir() 取回。
+
+    Args:
+        cfg (RunConfig): 一次求解的可变参数（None 字段用 config 现值）。
+
+    Returns:
+        Solution: 求解结果（取值/成本/四项核对等纯数据）。
     """
     _apply(cfg)
     config.RESULT_DIR = Path(cfg.result_dir) if cfg.result_dir is not None else config.RESULT_DIR
@@ -88,7 +101,11 @@ def run(cfg: RunConfig) -> Solution:
 
 def last_result_dir() -> Path:
     """最近一次 run 实际落盘目录（solve 会把 RESULT_DIR 指到时间戳子目录）。
-    串行执行下紧跟 run() 调用是安全的。"""
+    串行执行下紧跟 run() 调用是安全的。
+
+    Returns:
+        Path: 最近一次求解的实际落盘目录。
+    """
     return Path(config.RESULT_DIR)
 
 
@@ -97,6 +114,12 @@ def run_with_outputs(cfg: RunConfig) -> tuple[Solution, object]:
 
     返回 (solution, inp)——服务层自建 AnalysisExport(inp, solution) 组装
     analysis/views/metrics 与前端件（report/positionChart），不再读 结果.json。
+
+    Args:
+        cfg (RunConfig): 一次求解的可变参数。
+
+    Returns:
+        tuple[Solution, Inputs]: (求解结果, 系统公共输入)。
     """
     _apply(cfg)
     inp = reader.load_inputs()

@@ -17,7 +17,15 @@ import numpy as np
 
 
 def build_position_chart(inp, solution) -> dict:
-    """工作位置图 tab（views.positionChart，原 analysis_export.build_views tab1 平移）。"""
+    """工作位置图 tab（views.positionChart，原 analysis_export.build_views tab1 平移）。
+
+    Args:
+        inp (Inputs): 系统公共输入。
+        solution (Solution): 求解结果。
+
+    Returns:
+        dict: {title, panels}（stacked 面板 + 参照线）。
+    """
     V = solution.values
     U = solution.units
     T = inp.time.T
@@ -78,7 +86,17 @@ def build_position_chart(inp, solution) -> dict:
 
 
 def build_report(inp, solution, metrics: dict, scenario: str) -> dict:
-    """report 19 字段（原 solution.write_result_json 的 report 块平移，字段集冻结）。"""
+    """report 19 字段（原 solution.write_result_json 的 report 块平移，字段集冻结）。
+
+    Args:
+        inp (Inputs): 系统公共输入。
+        solution (Solution): 求解结果。
+        metrics (dict): AnalysisExport.metrics() 产物。
+        scenario (str): 水文情景名。
+
+    Returns:
+        dict: report 19 字段。
+    """
     return {
         "hours": inp.time.T,
         "startTime": str(inp.time.Time[0]), "endTime": str(inp.time.Time[-1]),

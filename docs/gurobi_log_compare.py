@@ -1,6 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""对比两个 Gurobi log 的四件硬证据 + 过程 Info。
+"""
+@Time    : 2026/09/24 14:27
+@Author  : weiyutao
+@File    : gurobi_log_compare.py
+
+对比两个 Gurobi log 的四件硬证据 + 过程 Info。
 用法: python gurobi_log_compare.py matlab.log python.log
 """
 import re
@@ -17,6 +22,14 @@ KEYS = [
 ]
 
 def pull(path):
+    """从 Gurobi log 抽取四件硬证据 + 过程指标（KEYS 正则逐项匹配）。
+
+    Args:
+        path: log 文件路径。
+
+    Returns:
+        dict: {指标名: 匹配组元组}；未匹配到的指标值为 None。
+    """
     out = {}
     with open(path, encoding="utf-8", errors="ignore") as f:
         txt = f.read()
