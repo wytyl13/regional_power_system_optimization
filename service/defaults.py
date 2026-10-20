@@ -99,7 +99,10 @@ DEFAULT_CONFIG = {
             "genCost": 50,
             "fom": 150000,
         },
-        "wind": {"fom": 100000},
+        # v3（20261021）：陆上/海上风电分页。classes：sheet 名 → 前缀归类规则 + UnitKey 后缀
+        "wind": {"fom": 100000,
+                 "classes": {"陆上风电": {"prefixes": ["陆风"], "key": "ONSHORE"},
+                             "海上风电": {"prefixes": ["海风"], "key": "OFFSHORE"}}},
         "pv": {"fom": 30000},
         "pumpedStorage": {
             "fom": 90000,

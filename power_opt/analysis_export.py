@@ -184,11 +184,33 @@ def cost_analysis(solution):
     return {"costSummary": cost_summary, "costDetail": cost_detail}
 
 
-# ---------- 九、火电启停（1334-1352）----------
+# ---------- 九、火电启停（新版 1568-1613）----------
+
+def thermal_events(solution):
+    """新版 1571-1575：v/w 为连续变量，启停次数按 u 差分取得（含初态 u_0），
+    与最优解中的 v/w 一致，且不受超时候选解的零碎值影响。
+
+    Args:
+        solution (Solution): 求解结果。
+
+    Returns:
+        dict: {v_th/w_th/v_gas/w_gas: 0/1 int 矩阵}。
+    """
+    V = solution.values
+    U = solution.units
+    out = {}
+    for group, prefix in (("thermal", "th"), ("gas", "gas")):
+        u = np.rint(V[f"u_{prefix}"]).astype(int)
+        u0 = np.asarray(U[group]["initial_status"], dtype=int)
+        change = np.diff(np.concatenate([u0[:, None], u], axis=1), axis=1)
+        out[f"v_{prefix}"] = np.maximum(change, 0)
+        out[f"w_{prefix}"] = np.maximum(-change, 0)
+    return out
+
 
 def thermal_analysis(inp, solution):
-    """煤电+气电逐台：启动/停机次数直接取 v/w（不推断）、在线小时、检修小时、
-    发电量与等效满负荷小时（=发电量/额定容量）。统计含首小时相对初态的切换。
+    """煤电+气电逐台：启动/停机次数按 u 差分（含初态切换，不取连续 v/w 原值）、
+    在线小时、检修小时、发电量与等效满负荷小时（=发电量/额定容量）。
 
     Args:
         inp (Inputs): 系统公共输入。
@@ -199,6 +221,7 @@ def thermal_analysis(inp, solution):
     """
     V = solution.values
     U = solution.units
+    E = thermal_events(solution)
     rows = []
     for group, prefix, label in (("thermal", "th", "煤电"), ("gas", "gas", "气电")):
         keys = U[group]["keys"]
@@ -206,8 +229,8 @@ def thermal_analysis(inp, solution):
         rated = np.asarray(U[group]["rated"])
         rows.extend({
             "unitKey": str(k), "name": str(n), "type": label,
-            "starts": int(V[f"v_{prefix}"][i].sum()),
-            "stops": int(V[f"w_{prefix}"][i].sum()),
+            "starts": int(E[f"v_{prefix}"][i].sum()),
+            "stops": int(E[f"w_{prefix}"][i].sum()),
             "onlineHours": float(V[f"u_{prefix}"][i].sum() * inp.time.Delta_t),
             "maintenanceHours": float(np.asarray(U[group]["maintenance"])[i].sum()
                                       * inp.time.Delta_t),
@@ -263,18 +286,20 @@ def storage_analysis(inp, solution):
     return {"storageSummary": rows}
 
 
-# ---------- 十一、设备出力 + 风光消纳（1430-1462）----------
+# ---------- 十一、设备出力 + 风光消纳（新版 1706-1777）----------
 
 def device_analysis(inp, solution):
-    """11 类设备全 T 小时电量和最大出力。放电量单列、不解释为一次能源结构；
-    友好站只计净上网（风直送+光直送+放电），不与站内量重复计入。
+    """12 类设备全 T 小时电量和最大出力（风电拆陆上/海上）。放电量单列、
+    不解释为一次能源结构；友好站只计净上网（风直送+光直送+放电），
+    不与站内量重复计入。
 
     Args:
         inp (Inputs): 系统公共输入。
         solution (Solution): 求解结果。
 
     Returns:
-        dict: {deviceSummary: 设备电量/峰值, renewableSummary: 风光消纳}。
+        dict: {deviceSummary: 设备电量/峰值, renewableSummary: 风光消纳,
+    windSummary: 陆风/海风消纳（不含友好站）}。
     """
     V = solution.values
     dt = inp.time.Delta_t
@@ -284,7 +309,9 @@ def device_analysis(inp, solution):
     device_power = [
         ("煤电", V["P_th"].sum(axis=0)), ("气电", V["P_gas"].sum(axis=0)),
         ("生物质", V["P_bio"].sum(axis=0)), ("核电", V["P_nuc"].sum(axis=0)),
-        ("常规水电", hydro.sum(axis=0)), ("普通风电", V["P_wind"].sum(axis=0)),
+        ("常规水电", hydro.sum(axis=0)),
+        ("陆上风电", V["P_wind_on"].sum(axis=0)),
+        ("海上风电", V["P_wind_off"].sum(axis=0)),
         ("普通光伏", V["P_pv"].sum(axis=0)),
         ("光热", V["P_csp_unit"].sum(axis=0)),   # 2026-10-16 接入（N=0 → 0 行）
         ("新能源友好站净上网", fr_net.sum(axis=0)),
@@ -321,7 +348,26 @@ def device_analysis(inp, solution):
                                   if avail_energy > 0 else None,
         })
     renewable_summary = {"items": items}
-    return {"deviceSummary": device_summary, "renewableSummary": renewable_summary}
+    # 新版 1753-1761：陆风、海风单独统计（不含友好站，友好站无陆海类型）
+    P = inp.profiles
+    wind_spec = [
+        ("陆上风电", np.asarray(P.P_wind_on_available).sum(axis=0),
+         V["P_wind_on_curt"].sum(axis=0)),
+        ("海上风电", np.asarray(P.P_wind_off_available).sum(axis=0),
+         V["P_wind_off_curt"].sum(axis=0)),
+    ]
+    wind_items = []
+    for label, available, curtailed in wind_spec:
+        avail_energy = float(np.sum(available) * dt)
+        curt_energy = float(np.sum(curtailed) * dt)
+        wind_items.append({
+            "type": label, "availableMWh": avail_energy,
+            "curtailedMWh": curt_energy,
+            "utilizationPercent": 100.0 * (1 - curt_energy / avail_energy)
+                                  if avail_energy > 0 else None,
+        })
+    return {"deviceSummary": device_summary, "renewableSummary": renewable_summary,
+            "windSummary": {"items": wind_items}}
 
 
 def build_analysis(inp, solution):
@@ -388,7 +434,7 @@ def build_views(inp, solution):
     # ==== tab1：设备运行（00 图口径 = plot.write_chart_csv；21 列 + 2 负荷线）====
     device = PL.build_device_data(inp, solution)
     assert np.abs(device.sum(axis=2) - P_D).max() < 1e-3, \
-        "21 列合计≠响应后负荷：有设备列漏算"
+        "22 列合计≠响应后负荷：有设备列漏算"
     scopes = PL._scopes(inp)
     panels = []
     for scopeName, M in scopes:                   # 海南单分区 → 1 个 panel
@@ -430,6 +476,7 @@ def build_views(inp, solution):
     }
 
     # ==== tab4：火电启停（02 图：状态热图 + 在线数阶梯线 + 启停成组柱）====
+    events = thermal_events(solution)             # 新版 §9：次数按 u 差分（含初态）
     u_all = np.vstack([V["u_th"], V["u_gas"]]).astype(int)
     mtn = np.vstack([np.asarray(U["thermal"]["maintenance"]),
                      np.asarray(U["gas"]["maintenance"])]).astype(int)
@@ -454,8 +501,8 @@ def build_views(inp, solution):
             {"type": "bar", "orientation": "vertical",
              "title": "全部%d小时启停次数（含初态切换）" % T,
              "categories": ["煤电", "气电"],
-             "series": {"启动": [int(V["v_th"].sum()), int(V["v_gas"].sum())],
-                        "停机": [int(V["w_th"].sum()), int(V["w_gas"].sum())]},
+             "series": {"启动": [int(events["v_th"].sum()), int(events["v_gas"].sum())],
+                        "停机": [int(events["w_th"].sum()), int(events["w_gas"].sum())]},
              "yLabel": "次数"},
         ],
     }
@@ -581,7 +628,8 @@ def _cell(arrays):
 
 
 def write_mat(inp, solution, metrics, analysis, path) -> None:
-    """海南分析结果.mat：19 个变量与 MATLAB :1545 save 清单逐一对齐。
+    """海南分析结果.mat：30 个变量与新版 1849-1856 save 清单逐一对齐
+    （新增 WindSummary 及陆海风电可用/出力/弃电、装机与分区表）。
     datetime/string/table 在 scipy 写出端拾遗：→ char / struct array。
 
     Args:
@@ -647,11 +695,16 @@ def write_mat(inp, solution, metrics, analysis, path) -> None:
         analysis["renewableSummary"]["items"],
         ("type", "availableMWh", "curtailedMWh", "utilizationPercent"),
         string_fields=("type",))
+    wind_summary = _table(
+        analysis["windSummary"]["items"],
+        ("type", "availableMWh", "curtailedMWh", "utilizationPercent"),
+        string_fields=("type",))
 
-    # 火电合并矩阵（15×T，MATLAB [u_th;u_gas] 同序）
+    # 火电合并矩阵（15×T，MATLAB [u_th;u_gas] 同序；v/w 为 u 差分值，新版 1572-1575）
+    E = thermal_events(solution)
     u_thermal = np.vstack([V["u_th"], V["u_gas"]]).astype(np.uint8)
-    v_thermal = np.vstack([V["v_th"], V["v_gas"]]).astype(np.uint8)
-    w_thermal = np.vstack([V["w_th"], V["w_gas"]]).astype(np.uint8)
+    v_thermal = np.vstack([E["v_th"], E["v_gas"]]).astype(np.uint8)
+    w_thermal = np.vstack([E["w_th"], E["w_gas"]]).astype(np.uint8)
     thermal_maintenance = np.vstack([U["thermal"]["maintenance"],
                                      U["gas"]["maintenance"]]).astype(np.uint8)
     thermal_power = np.vstack([V["P_th"], V["P_gas"]]).astype(float)
@@ -697,6 +750,17 @@ def write_mat(inp, solution, metrics, analysis, path) -> None:
         "P_load": np.asarray(solution.inputs_fields["P_load"], dtype=float),
         "P_shift_in_result": V["P_shift_in"], "P_shift_out_result": V["P_shift_out"],
         "P_cut_result": V["P_cut"], "P_shed_result": V["P_shed"],
+        # 新版 1854-1856 save 清单新增：陆海风电拆分与装机、分区表
+        "WindSummary": wind_summary,
+        "P_wind_on_available": np.asarray(inp.profiles.P_wind_on_available, dtype=float),
+        "P_wind_off_available": np.asarray(inp.profiles.P_wind_off_available, dtype=float),
+        "P_wind_on_result": V["P_wind_on"], "P_wind_off_result": V["P_wind_off"],
+        "P_wind_on_curt_result": V["P_wind_on_curt"],
+        "P_wind_off_curt_result": V["P_wind_off_curt"],
+        "W_on_cap_area": np.asarray(inp.wind_pv.W_on_cap_area, dtype=float),
+        "W_off_cap_area": np.asarray(inp.wind_pv.W_off_cap_area, dtype=float),
+        "AreaID": np.array([str(a) for a in inp.areas.AreaID], dtype=object).reshape(1, -1),
+        "AreaName": np.array([str(a) for a in inp.areas.AreaName], dtype=object).reshape(1, -1),
     }
     savemat(path, payload, do_compression=True, oned_as="row")
     print("已导出: %s" % path)
@@ -772,6 +836,13 @@ def write_summary_txt(inp, solution, metrics, analysis, path) -> None:
                 % metrics["energyNotServed"])
     text.append("以上仅对应本次周期与参数，不代表全年运行结论；"
                 "有限求解间隙下，逐时调度可能存在多个近优方案。")
+    # 新版 1842-1847：文件重开追加五、陆风与海风（不含友好电站）
+    text.append("")
+    text.append("五、陆风与海风（不含友好电站）")
+    for it in analysis["windSummary"]["items"]:
+        rate = "%.2f%%" % it["utilizationPercent"] if it["utilizationPercent"] is not None else "NaN"
+        text.append("%s：可用电量%.2fMWh，弃电%.2fMWh，利用率%s。"
+                    % (it["type"], it["availableMWh"], it["curtailedMWh"], rate))
     path.write_text("\n".join(text) + "\n", encoding="utf-8")
     print("已导出: %s" % path)
 
@@ -876,11 +947,12 @@ def plot_analysis_figures(inp, solution, analysis, out_dir) -> list:
     fig.savefig(out_dir / "01_成本构成.png", dpi=180, bbox_inches="tight")
     plt.close(fig); written.append("01_成本构成.png")
 
-    # ---- 02_火电启停（1338-1375：状态热图 + 在线数 stairs + 启停 bar）----
+    # ---- 02_火电启停（新版 1588-1612：状态热图 + 在线数 stairs + 启停 bar）----
     n_th = len(U["thermal"]["keys"])
+    E = thermal_events(solution)             # 新版 1572-1575：v/w 按 u 差分（含初态）
     u_thermal = np.vstack([V["u_th"], V["u_gas"]]).astype(int)
-    v_thermal = np.vstack([V["v_th"], V["v_gas"]]).astype(int)
-    w_thermal = np.vstack([V["w_th"], V["w_gas"]]).astype(int)
+    v_thermal = np.vstack([E["v_th"], E["v_gas"]]).astype(int)
+    w_thermal = np.vstack([E["w_th"], E["w_gas"]]).astype(int)
     mtn = np.vstack([np.asarray(U["thermal"]["maintenance"]),
                      np.asarray(U["gas"]["maintenance"])]).astype(int)
     keys = [str(k) for k in U["thermal"]["keys"]] + \
@@ -982,6 +1054,60 @@ def plot_analysis_figures(inp, solution, analysis, out_dir) -> list:
         fig.savefig(out_dir / (fname + ".png"), dpi=180, bbox_inches="tight")
         plt.close(fig); written.append(fname + ".png")
 
+        if fname == "04_独立电化学储能":
+            # 新版 1668-1701：按自然日刻度的独立储能图（逐小时功率 + 全部 SOC 边界，
+            # 横轴每天 00:00 一个节点；首尾非整日时也标出实际起止时刻）。
+            import datetime as _dtmod
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14.5, 8), facecolor="w")
+            xb = np.arange(len(plot_rows)) + 0.5       # 功率柱置于每小时区间中心
+            ax1.bar(xb, dis.sum(axis=0), 0.9, facecolor=(0.18, 0.49, 0.70),
+                    edgecolor="none", label="发电/放电")
+            ax1.bar(xb, -ch.sum(axis=0), 0.9, facecolor=(0.25, 0.70, 0.65),
+                    edgecolor="none", label="抽水/充电")
+            ax1.axhline(0, color=(0.4, 0.4, 0.4), lw=0.8)
+            ax1.set_xlim(0, len(plot_rows))
+            ax1.set_ylabel("功率 / MW"); ax1.set_title("同类型功率汇总，充电为负")
+            ax1.legend(loc="upper center", bbox_to_anchor=(0.5, 1.18), ncol=2,
+                       frameon=False)
+            _styled_axes(ax1)
+            for i, n in enumerate(names):
+                ax2.plot(boundary, soc[i, plot_rows[0]:plot_rows[-1] + 2],
+                         color=colors[i], lw=1.7, label=str(n))
+                ax2.axhline(100 * U[group]["soc_min"][i], ls="--", color=colors[i], lw=0.9)
+                ax2.axhline(100 * U[group]["soc_max"][i], ls="--", color=colors[i], lw=0.9)
+            ax2.set_xlim(0, len(plot_rows)); ax2.set_ylim(0, 100)
+            ax2.set_ylabel("SOC / %")
+            ax2.set_xlabel("日期（月/日，节点为00:00；非整日起止另标时刻）")
+            ax2.set_title("逐台SOC轨迹，虚线为各自上下限")
+            ax2.legend(loc="upper center", bbox_to_anchor=(0.5, 1.18),
+                       ncol=min(4, len(names)), frameon=False)
+            _styled_axes(ax2)
+            daily_start = plot_time[0]
+            daily_end = plot_time[-1] + _dtmod.timedelta(
+                hours=inp.time.Delta_t)
+            day = daily_start.replace(hour=0, minute=0)
+            midnights = []
+            while day <= daily_end.replace(hour=0, minute=0):
+                if daily_start <= day <= daily_end:
+                    midnights.append(day)
+                day += _dtmod.timedelta(days=1)
+            seen = set()
+            daily_times = [t for t in [daily_start] + midnights + [daily_end]
+                           if not (t in seen or seen.add(t))]
+            daily_ticks = [(t - daily_start).total_seconds() / 3600
+                           / inp.time.Delta_t for t in daily_times]
+            daily_labels = [t.strftime("%m/%d") if (t.hour, t.minute) == (0, 0)
+                            else t.strftime("%m/%d %H:%M") for t in daily_times]
+            for daily_ax in (ax1, ax2):
+                daily_ax.set_xticks(daily_ticks)
+                daily_ax.set_xticklabels(daily_labels)
+                daily_ax.grid(axis="x", alpha=0.15)
+            fig.tight_layout(rect=(0, 0, 1, 0.93))
+            _fig_frame(fig, "独立电化学储能运行特征（按日刻度）", None)
+            fig.savefig(out_dir / "04_独立电化学储能_按日刻度.png", dpi=180,
+                        bbox_inches="tight")
+            plt.close(fig); written.append("04_独立电化学储能_按日刻度.png")
+
     # ---- 06_设备出力统计（1438-1455：1×2 barh）----
     dev = analysis["deviceSummary"]["items"]
     fig, axes = plt.subplots(1, 2, figsize=(14.0, 6.5), facecolor="w")
@@ -1033,6 +1159,38 @@ def plot_analysis_figures(inp, solution, analysis, out_dir) -> list:
     _fig_frame(fig, "海南风光消纳（包含友好电站）", None)
     fig.savefig(out_dir / "07_风光消纳.png", dpi=180, bbox_inches="tight")
     plt.close(fig); written.append("07_风光消纳.png")
+
+    # ---- 08_陆风海风消纳（新版 1753-1777：陆/海风单独统计，不含友好电站）----
+    P = inp.profiles
+    wind_split_av = [np.asarray(P.P_wind_on_available).sum(axis=0),
+                     np.asarray(P.P_wind_off_available).sum(axis=0)]
+    wind_split_curt = [V["P_wind_on_curt"].sum(axis=0),
+                       V["P_wind_off_curt"].sum(axis=0)]
+    wind_items = analysis["windSummary"]["items"]
+    wind_ratios = [it["utilizationPercent"] for it in wind_items]
+    wind_labels = [it["type"] for it in wind_items]
+    fig, axes = plt.subplots(2, 1, figsize=(14.5, 7.5), facecolor="w")
+    for k in range(2):
+        ax = axes[k]
+        av = wind_split_av[k]
+        curt = wind_split_curt[k]
+        ax.plot(plot_rows + 1, av[plot_rows], "--", color=(0.55, 0.57, 0.61), lw=1.5)
+        ax.plot(plot_rows + 1, (av - curt)[plot_rows], "-",
+                color=(0.17, 0.57, 0.49), lw=1.7)
+        ax.bar(plot_rows + 1, curt[plot_rows], 0.6, facecolor=(0.92, 0.57, 0.29),
+               edgecolor="none", alpha=0.55)
+        ax.set_xlim(0.5, len(plot_rows) + 0.5)
+        ax.set_xticks(ticks + 1); ax.set_xticklabels(tick_labels)
+        ax.set_ylabel("功率 / MW")
+        ax.legend(["可用功率", "已利用功率", "弃电功率"], loc="upper center",
+                  bbox_to_anchor=(0.5, 1.2), ncol=3, frameon=False)
+        ax.set_title("%s｜全周期利用率 %s" % (wind_labels[k],
+              "%.2f%%" % wind_ratios[k] if wind_ratios[k] is not None else "无可用出力"))
+        _styled_axes(ax)
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    _fig_frame(fig, "海南陆上、海上风电消纳（不含友好电站）", None)
+    fig.savefig(out_dir / "08_陆风海风消纳.png", dpi=180, bbox_inches="tight")
+    plt.close(fig); written.append("08_陆风海风消纳.png")
     return written
 
 
@@ -1068,6 +1226,10 @@ def export_analysis(inp, solution, metrics, analysis=None, result_root=None) -> 
     plot_analysis_figures(inp, solution, analysis, out_dir)
     write_mat(inp, solution, metrics, analysis, out_dir / "海南分析结果.mat")
     write_summary_txt(inp, solution, metrics, analysis, out_dir / "分析摘要.txt")
+    # 新版 §12.1：Excel 汇总与明细（数据在 Solution.sheets，此处仅写盘）
+    if config.EXPORT_EXCEL_RESULTS:
+        from excel_export import write_excel
+        write_excel(solution, out_dir / "模型输出结果_逐小时.xlsx")
     print("分析结果目录: %s" % out_dir)
 
 

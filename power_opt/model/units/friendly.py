@@ -48,11 +48,12 @@ INF = gp.GRB.INFINITY
 
 @dataclass
 class FrVars:
-    """MATLAB 2.9 节决策变量的镜像，共 11 个。"""
+    """MATLAB 2.9 节决策变量的镜像。新版 744：放电状态取表达式
+    u_fr_dis = 1 - u_fr_ch，不再单独建二值变量。"""
     P_fr_wind_out: gp.MVar; P_fr_wind_ch: gp.MVar; P_fr_wind_curt: gp.MVar
     P_fr_pv_out: gp.MVar; P_fr_pv_ch: gp.MVar; P_fr_pv_curt: gp.MVar
     P_fr_charge: gp.MVar; P_fr_discharge: gp.MVar
-    u_fr_ch: gp.MVar; u_fr_dis: gp.MVar
+    u_fr_ch: gp.MVar; u_fr_dis: object   # 充电状态二值 / 放电状态表达式 1-u_fr_ch
     E_fr: gp.MVar                  # 首列初始，后续时段末（N_fr×(T+1)）
 
 
@@ -175,7 +176,7 @@ class Friendly:
         P_fr_charge    = m.addMVar((N, T), lb=-INF, name="P_fr_charge")
         P_fr_discharge = m.addMVar((N, T), lb=-INF, name="P_fr_discharge")
         u_fr_ch  = m.addMVar((N, T), vtype=gp.GRB.BINARY, name="u_fr_ch")
-        u_fr_dis = m.addMVar((N, T), vtype=gp.GRB.BINARY, name="u_fr_dis")
+        u_fr_dis = 1 - u_fr_ch                    # 新版 744：放电状态为表达式
         E_fr     = m.addMVar((N, T + 1), lb=-INF, name="E_fr")
         self.vars = FrVars(P_fr_wind_out=P_fr_wind_out, P_fr_wind_ch=P_fr_wind_ch,
                            P_fr_wind_curt=P_fr_wind_curt, P_fr_pv_out=P_fr_pv_out,
@@ -223,12 +224,10 @@ class Friendly:
         Pmax = np.repeat(fr.P_fr_es_max[:, None], T, axis=1)
         m.addConstr(0 <= Pch, name="fr_Pch_lb") # Math: P_{c,i,t} \ge 0（充电功率非负约束）
         m.addConstr(Pch <= Pmax * uch, name="fr_Pch_ub") # Math: P_{c,i,t} \le P_{fr,i}^{max} u_{ch,i,t}（充电状态功率上限约束）
-        # ---- MATLAB 888：0 <= P_dis <= Pmax·u_dis ----
+        # ---- MATLAB 1004：0 <= P_dis <= Pmax·u_dis（u_dis=1-u_ch 表达式，互斥行已删）----
         m.addConstr(0 <= Pdis, name="fr_Pdis_lb") # Math: P_{d,i,t} \ge 0（放电功率非负约束）
-        m.addConstr(Pdis <= Pmax * udis, name="fr_Pdis_ub") # Math: P_{d,i,t} \le P_{fr,i}^{max} u_{dis,i,t}（放电状态功率上限约束）
-        # ---- MATLAB 889：充放互斥 ----
-        m.addConstr(uch + udis <= 1, name="fr_mutex") # Math: u_{ch,i,t} + u_{dis,i,t} \le 1（同一时段不能同时充电和放电互斥约束）
-        # ---- MATLAB 890-892：SOC 递推（自放电 1-loss；充 η_ch、放 1/η_dis）----
+        m.addConstr(Pdis <= Pmax * udis, name="fr_Pdis_ub") # Math: P_{d,i,t} \le P_{fr,i}^{max} (1 - u_{ch,i,t})（放电状态功率上限约束，单整数互斥）
+        # ---- MATLAB 1005：SOC 递推（自放电 1-loss；充 η_ch、放 1/η_dis）----
         loss = np.repeat(fr.loss_fr[:, None], T, axis=1)
         eta_ch = np.repeat(fr.eta_fr_ch[:, None], T, axis=1)
         inv_eta_dis = np.repeat((1.0 / fr.eta_fr_dis)[:, None], T, axis=1)
@@ -292,8 +291,8 @@ if __name__ == "__main__":
     Fv = frI.add_vars(m)
     m.update()
     N = fr.N_fr
-    exp_cols = 10 * N * T + N * (T + 1)     # 8 连续 + 2 二值 + E_fr
-    exp_bins = 2 * N * T
+    exp_cols = 9 * N * T + N * (T + 1)      # 8 连续 + 1 二值 + E_fr（u_dis 为表达式）
+    exp_bins = N * T
     print('变量列数  期望=%d  实际=%d' % (exp_cols, m.NumVars))
     print('二值变量  期望=%d  实际=%d' % (exp_bins, m.NumBinVars))
     assert m.NumVars == exp_cols and m.NumBinVars == exp_bins, '变量清单与推导不符'
@@ -301,8 +300,8 @@ if __name__ == "__main__":
 
     frI.add_constraints(m, inp)
     m.update()
-    exp_rows = 15 * N * T + 2 * N * (T + 1) + 2 * N   # 15 块 + E 界×2 + 首末×2
-    exp_nz = 27 * N * T + 2 * N * (T + 1) + 2 * N
+    exp_rows = 14 * N * T + 2 * N * (T + 1) + 2 * N   # 14 块（互斥行已删） + E 界×2 + 首末×2
+    exp_nz = 25 * N * T + 2 * N * (T + 1) + 2 * N
     print('友好电站约束行数  期望=%d  实际=%d' % (exp_rows, m.NumConstrs))
     assert m.NumConstrs == exp_rows, '行数与手推账本不符'
     print('友好电站非零元  期望=%d  实际=%d' % (exp_nz, m.getAttr('NumNZs')))

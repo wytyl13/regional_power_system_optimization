@@ -128,11 +128,13 @@ def main() -> int:
     station = wind_tbl["rows"][0]["电站名称"]
     q = "&".join(f"{k}={station}" for k in wind_curve["filterBy"])
     cv = get(f"/api/datasets/{ds_id}/curves/{wind_curve['sheet']}?{q}")
-    assert len(cv["rows"]) == 365 and cv["columns"][0] == "日期", (len(cv["rows"]), cv["columns"])
-    assert not {"区域", "电站名称"} & set(cv["columns"])   # 标识列已剔
+    assert len(cv["index"]) == 365 and len(cv["data"]) == 24, (len(cv["index"]), len(cv["data"]))
+    assert cv["sheet_name"] == wind_curve["sheet"]
+    assert isinstance(cv["data"][0]["data"][0], (int, float))   # 数值不转字符串
+    assert not {"区域", "电站名称"} & {d["column_name"] for d in cv["data"]}   # 标识列已剔
     print(f"曲线懒加载 OK: 风电[{station}] → 365 行")
     pv = get(f"/api/datasets/{ds_id}/curves/光伏-出力曲线")
-    assert len(pv["rows"]) == 365, len(pv["rows"])
+    assert len(pv["index"]) == 365, len(pv["index"])
     # 0 命中 → 422
     try:
         get(f"/api/datasets/{ds_id}/curves/常规水电-出力曲线?电站名称=不存在")

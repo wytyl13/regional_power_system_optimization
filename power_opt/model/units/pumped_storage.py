@@ -184,9 +184,13 @@ class PumpedStorage:
         # ---- MATLAB 841：检修不可用（右端 1-m_ps 常数矩阵）----
         m.addConstr(ugen <= 1 - ps.m_ps, name="u_gen_maint") # Math: u_{g,i,t} \le 1 - m_{ps,i,t}（计划检修状态禁止发电约束）
         m.addConstr(upump <= 1 - ps.m_ps, name="u_pump_maint") # Math: u_{p,i,t} \le 1 - m_{ps,i,t}（计划检修状态禁止抽水约束）
-        # ---- MATLAB 844/845：单机方向 ≤ 所在分区方向（借系统层 u_ps_area）----
-        m.addConstr(ugen <= sv.u_ps_area_gen[ps.area_ps, :], name="u_gen_area") # Math: u_{g,i,t} \le u_{ps,A(t)}^{gen}（单机发电方向不超所在分区方向约束）
-        m.addConstr(upump <= sv.u_ps_area_pump[ps.area_ps, :], name="u_pump_area") # Math: u_{p,i,t} \le u_{ps,A(t)}^{pump}（单机抽水方向不超所在分区方向约束）
+        # ---- 新版 958-966：单机方向 ≤ 所在分区方向，仅多台抽蓄分区的机组建 ----
+        # （分区仅一台时单机互斥已保证方向一致，不建冗余行；u_ps_area 为 None）
+        if sv.u_ps_area_gen is not None:
+            psMulti = np.bincount(ps.area_ps, minlength=inp.areas.Narea) >= 2
+            mi = np.where(psMulti[ps.area_ps])[0]          # 多台分区的机组行
+            m.addConstr(ugen[mi] <= sv.u_ps_area_gen[ps.area_ps[mi], :], name="u_gen_area") # Math: u_{g,i,t} \le u_{ps,A(t)}^{gen}（单机发电方向不超所在分区方向约束，仅多台分区）
+            m.addConstr(upump[mi] <= sv.u_ps_area_pump[ps.area_ps[mi], :], name="u_pump_area") # Math: u_{p,i,t} \le u_{ps,A(t)}^{pump}（单机抽水方向不超所在分区方向约束，仅多台分区）
         # ---- MATLAB 847：SOC 递推（无自放电；抽水 +、发电 −）----
         eta_pump = np.repeat(ps.eta_ps_pump[:, None], T, axis=1)
         inv_eta_gen = np.repeat((1.0 / ps.eta_ps_gen)[:, None], T, axis=1)
@@ -249,20 +253,18 @@ if __name__ == "__main__":
     assert m.NumVars == exp_cols and m.NumBinVars == exp_bin, '变量清单与推导不符'
     print('抽蓄变量清单核对通过')
 
-    # 系统层变量占位（844/845 耦合需要 u_ps_area；add_vars 顺带建分区互斥行）
+    # 系统层变量占位（958-966 耦合需要 u_ps_area；多台分区才建）
     from model import context as CT
-    Sv = CT.add_vars(m, inp)
+    Sv = CT.add_vars(m, inp, ps.area_ps)
     pst.add_constraints(m, inp, Sv)
     m.update()
-    exp_rows = 13 * N * T + 2 * N * (T + 1) + 2 * N   # 13 块 + E 界×2 + 首末×2
-    sys_mu_rows = inp.areas.Narea * T                       # u_ps_area_mu（Narea×T 行）
-    actual_rows = m.NumConstrs - sys_mu_rows
-    print('抽蓄约束行数  期望=%d  实际=%d' % (exp_rows, actual_rows))
-    assert actual_rows == exp_rows, '行数与手推账本不符'
-    # 逐块每行元数：837a=1、837b/838/839/840=2、841×2=1、844/845=2（对系统层二值）、
-    # 847=4、856=1、857=3、858=2 → 25/行；江苏 N=25,T=24→16300、海南 N=1,T=168→4540 均吻合
-    exp_nz = 25 * N * T + 2 * N * (T + 1) + 2 * N
-    actual_nz = m.getAttr('NumNZs') - 2 * sys_mu_rows  # 减 u_ps_area_mu 的 2 元/行
-    print('抽蓄非零元  期望=%d  实际=%d' % (exp_nz, actual_nz))
-    assert actual_nz == exp_nz, '非零元与手推账本不符'
+    # 海南单台抽蓄：无分区方向行，账本不含 844/845（江苏多台分区另含 N_multi×T 行×2）
+    exp_rows = 11 * N * T + 2 * N * (T + 1) + 2 * N   # 11 块（分区方向 2 块不建） + E 界×2 + 首末×2
+    print('抽蓄约束行数  期望=%d  实际=%d' % (exp_rows, m.NumConstrs))
+    assert m.NumConstrs == exp_rows, '行数与手推账本不符'
+    # 逐块每行元数：837a=1、837b/838/839/840=2、841×2=1、847=4、856=1、857=3、858=2
+    # → 21/行（新版：无 844/845 的 2 元/行）
+    exp_nz = 21 * N * T + 2 * N * (T + 1) + 2 * N
+    print('抽蓄非零元  期望=%d  实际=%d' % (exp_nz, m.getAttr('NumNZs')))
+    assert m.getAttr('NumNZs') == exp_nz, '非零元与手推账本不符'
     print('抽蓄约束账本核对通过')

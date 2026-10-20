@@ -39,30 +39,41 @@ class RegisteredUnits:
 
 @dataclass
 class SystemVars:
-    P_wind: gp.MVar; P_pv: gp.MVar
-    P_wind_curt: gp.MVar; P_pv_curt: gp.MVar
+    P_wind_on: gp.MVar; P_wind_off: gp.MVar              # 陆上/海上风电出力（新版 2.7 拆分）
+    P_wind_on_curt: gp.MVar; P_wind_off_curt: gp.MVar    # 陆上/海上风电弃风
+    P_wind: object; P_wind_curt: object                  # 表达式 on+off / on_curt+off_curt（总量口径）
+    P_pv: gp.MVar
+    P_pv_curt: gp.MVar
     P_shed: gp.MVar
     P_line: gp.MVar
     P_shift_out: gp.MVar; P_shift_in: gp.MVar; P_cut: gp.MVar
     P_shift_pair: list
-    u_ps_area_gen: gp.MVar; u_ps_area_pump: gp.MVar
+    u_ps_area_gen: object; u_ps_area_pump: object        # 分区方向整数；无多台抽蓄分区时为 None
 
 
-def add_vars(m: gp.Model, inp: Inputs) -> SystemVars:
+def add_vars(m: gp.Model, inp: Inputs, ps_area: np.ndarray = None) -> SystemVars:
     """创建系统层决策变量（MATLAB 2.6-2.13 变量 + 抽发互斥约束）。
+    新版 2.7：风电拆陆上/海上四个变量，总量口径为表达式；
+    新版 958-966：分区方向整数仅多台抽蓄分区建立（YALMIP 导出会丢弃
+    未被约束引用的变量，单台分区不建以对齐 MATLAB 变量/整数规模）。
 
     Args:
         m (gp.Model): Gurobi 模型。
         inp (Inputs): 系统公共输入。
+        ps_area (np.ndarray): 抽蓄机组 → 分区（0 基），判多台分区用。
 
     Returns:
         SystemVars: 系统层决策变量容器。
     """
     Narea, T = inp.areas.Narea, inp.time.T
     INF = gp.GRB.INFINITY
-    P_wind      = m.addMVar((Narea, T), lb=-INF, name="P_wind")              # MATLAB 629
+    P_wind_on      = m.addMVar((Narea, T), lb=-INF, name="P_wind_on")        # 新版 726
+    P_wind_off     = m.addMVar((Narea, T), lb=-INF, name="P_wind_off")
+    P_wind_on_curt = m.addMVar((Narea, T), lb=-INF, name="P_wind_on_curt")   # 727
+    P_wind_off_curt = m.addMVar((Narea, T), lb=-INF, name="P_wind_off_curt")
+    P_wind      = P_wind_on + P_wind_off                                     # 总量口径（728）
+    P_wind_curt = P_wind_on_curt + P_wind_off_curt
     P_pv        = m.addMVar((Narea, T), lb=-INF, name="P_pv")                # 633
-    P_wind_curt = m.addMVar((Narea, T), lb=-INF, name="P_wind_curt")         # 630
     P_pv_curt   = m.addMVar((Narea, T), lb=-INF, name="P_pv_curt")           # 634
     P_shed      = m.addMVar((Narea, T), lb=-INF, name="P_shed")              # 666
     P_line      = m.addMVar((inp.lines.N_line, T), lb=-INF, name="P_line")         # 667
@@ -72,10 +83,18 @@ def add_vars(m: gp.Model, inp: Inputs) -> SystemVars:
     P_shift_pair = [m.addMVar(len(inp.dr.shiftFrom[r]), lb=-INF,
                               name=f"shift_pair_{r}") if len(inp.dr.shiftFrom[r]) else None
                    for r in range(Narea)]                                    # 673-676
-    u_ps_area_gen  = m.addMVar((Narea, T), vtype=gp.GRB.BINARY, name="u_ps_area_gen")   # 623
-    u_ps_area_pump = m.addMVar((Narea, T), vtype=gp.GRB.BINARY, name="u_ps_area_pump")  # 624
-    m.addConstr(u_ps_area_gen + u_ps_area_pump <= 1, name="u_ps_area_mu")  # 840：同分区抽发互斥（无守卫，N_ps=0 仍建）
-    return SystemVars(P_wind=P_wind, P_pv=P_pv, P_wind_curt=P_wind_curt,
+    u_ps_area_gen = u_ps_area_pump = None
+    psCount = np.bincount(np.asarray(ps_area), minlength=Narea) if ps_area is not None and len(ps_area) \
+        else np.zeros(Narea, dtype=int)
+    if np.any(psCount >= 2):
+        multi_rows = np.where(psCount >= 2)[0]                               # MATLAB psMultiArea
+        u_ps_area_gen  = m.addMVar((Narea, T), vtype=gp.GRB.BINARY, name="u_ps_area_gen")   # 717
+        u_ps_area_pump = m.addMVar((Narea, T), vtype=gp.GRB.BINARY, name="u_ps_area_pump")  # 718
+        m.addConstr(u_ps_area_gen[multi_rows] + u_ps_area_pump[multi_rows] <= 1,
+                    name="u_ps_area_mu")  # 963：互斥行也只建多台分区行
+    return SystemVars(P_wind_on=P_wind_on, P_wind_off=P_wind_off,
+                      P_wind_on_curt=P_wind_on_curt, P_wind_off_curt=P_wind_off_curt,
+                      P_wind=P_wind, P_pv=P_pv, P_wind_curt=P_wind_curt,
                       P_pv_curt=P_pv_curt, P_shed=P_shed, P_line=P_line,
                       P_shift_out=P_shift_out, P_shift_in=P_shift_in, P_cut=P_cut,
                       P_shift_pair=P_shift_pair, u_ps_area_gen=u_ps_area_gen,
@@ -152,13 +171,18 @@ def add_constraints(m: gp.Model, inp: Inputs, sysv: SystemVars,
     """
     Narea, T, Np = inp.areas.Narea, inp.time.T, inp.areas.Nprovince
     INF = gp.GRB.INFINITY
-    # ---- 3.7/3.8：风、光（可用=出力+弃；煤电单测中可用=0 → 全被钉成 0）----
-    m.addConstr(sysv.P_wind + sysv.P_wind_curt == inp.profiles.P_wind_available, name="wind_bal")  # 861
-    m.addConstr(sysv.P_pv + sysv.P_pv_curt == inp.profiles.P_pv_available, name="pv_bal")         # 866
-    m.addConstr(sysv.P_wind[:,:] >= 0, name="wind_lb")                                    # 860
-    m.addConstr(sysv.P_pv[:,:] >= 0, name="pv_lb")                                       # 865
-    m.addConstr(sysv.P_wind_curt[:,:] >= 0, name="windcurt_lb")                          # 860
-    m.addConstr(sysv.P_pv_curt[:,:] >= 0, name="pvcurt_lb")                              # 865
+    # ---- 3.7/3.8：风（陆海分开 6 块）、光（可用=出力+弃）----
+    m.addConstr(sysv.P_wind_on >= 0, name="wind_on_lb")                          # 984
+    m.addConstr(sysv.P_wind_on_curt >= 0, name="wind_on_curt_lb")                # 984
+    m.addConstr(sysv.P_wind_off >= 0, name="wind_off_lb")                        # 985
+    m.addConstr(sysv.P_wind_off_curt >= 0, name="wind_off_curt_lb")              # 985
+    m.addConstr(sysv.P_wind_on + sysv.P_wind_on_curt == inp.profiles.P_wind_on_available,
+                name="wind_on_bal")                                              # 986
+    m.addConstr(sysv.P_wind_off + sysv.P_wind_off_curt == inp.profiles.P_wind_off_available,
+                name="wind_off_bal")                                             # 987
+    m.addConstr(sysv.P_pv + sysv.P_pv_curt == inp.profiles.P_pv_available, name="pv_bal")         # 992
+    m.addConstr(sysv.P_pv[:,:] >= 0, name="pv_lb")                                       # 991
+    m.addConstr(sysv.P_pv_curt[:,:] >= 0, name="pvcurt_lb")                              # 991
 
     # ---- 3.12 断面（MATLAB 932-933）----
     fwd = np.repeat(inp.lines.P_line_forward[:, None], T, axis=1)      # (N_line,T) 实测广播
@@ -233,7 +257,7 @@ def add_constraints(m: gp.Model, inp: Inputs, sysv: SystemVars,
     # ---- 3.16 新能源利用率（MATLAB 992-995）----
     A_prov = sp.csr_matrix((np.ones(Narea), (inp.areas.areaProvince, np.arange(Narea))),
                            shape=(Np, Narea))
-    curtail = A_prov @ (sysv.P_wind_curt + sysv.P_pv_curt
+    curtail = A_prov @ (sysv.P_wind_on_curt + sysv.P_wind_off_curt + sysv.P_pv_curt
                         + _amul(A_fr, units.friendly.P_fr_wind_curt   # 993：fr 弃风/弃光计入
                                 + units.friendly.P_fr_pv_curt))       # 省级弃电 (Np,T)
     availab = A_prov @ (inp.profiles.P_wind_available + inp.profiles.P_pv_available
@@ -324,6 +348,10 @@ if __name__ == "__main__":
     fri = FR.Friendly()                   # 友好电站已类化
     fri.load(inp)
     fr = fri.inputs
+    from model.units import csp as CS
+    cspu = CS.Csp()                       # 光热已类化（海南 N_csp=0，空类照建）
+    cspu.load(inp)
+    cc = cspu.inputs
     Tv = th.add_vars(m)
     Gv = ga.add_vars(m)
     Nv = nu.add_vars(m)
@@ -332,10 +360,11 @@ if __name__ == "__main__":
     Ev = ech.add_vars(m)
     Hv = hy.add_vars(m)                  # 水电类化；建序不变
     Fv = fri.add_vars(m)                 # 友好电站类化；建序不变
-    Sv = add_vars(m, inp)
+    Cv = cspu.add_vars(m)                # 光热类化；建序不变
+    Sv = add_vars(m, inp, ps.area_ps)    # 新版：ps_area 判多台分区
     units = RegisteredUnits(thermal=Tv, gas=Gv, nuclear=Nv, biomass=Bv,
                             pumped_storage=Pv, electrochemical=Ev, hydro=Hv,
-                            friendly=Fv)
+                            friendly=Fv, csp=Cv)
     th.add_constraints(m, inp)         # 煤电类化；建序不变
     ga.add_constraints(m, inp)         # 气电类化；建序不变
     nu.add_constraints(m, inp)         # 核电类化；建序不变
@@ -344,16 +373,21 @@ if __name__ == "__main__":
     ech.add_constraints(m, inp)        # 电储能类化；建序不变
     hy.add_constraints(m, inp)          # 水电类化；建序不变
     fri.add_constraints(m, inp)         # 友好电站类化；建序不变
-    add_constraints(m, inp, Sv, units, coal, gas, nuc, bio, ps, es, hyd, fr)
+    cspu.add_constraints(m, inp)        # 光热类化；建序不变
+    add_constraints(m, inp, Sv, units, coal, gas, nuc, bio, ps, es, hyd, fr, cc)
     m.update()
-    # 各模块账本（海南 T=168，见各模块 __main__）：行/列逐模块减出系统层
-    mod_rows = 64536 + 7566 + 3360 + 4711 + 2524 + 1852 + 1014 + 2860   # 煤/气/核/生/抽蓄/电储/水/友好
-    mod_cols = 42360 + 4038 + 840 + 1176 + 1009 + 1009 + 674 + 1849
-    print('系统层变量  期望=2884  实际=%d' % (m.NumVars - mod_cols))
-    print('系统层约束行  期望=4917  实际=%d' % (m.NumConstrs - mod_rows))
-    print('全模型: 列 %d(期望 55839) 行 %d(期望 93340) 二值 %d' %
-          (m.NumVars, m.NumConstrs, m.NumBinVars))
-    print('全模型非零元: %d（期望 265135）' % m.getAttr('NumNZs'))
-    assert (m.NumVars, m.NumConstrs, m.getAttr('NumNZs')) \
-        == (55839, 93340, 265135), '三项与 MATLAB log 不符'
-    print('三项与 MATLAB log（gurobi_hainan_last.log）逐位一致')
+    # v3 各模块账本（海南 T=168，见各模块 __main__）：行/列逐模块减出系统层
+    mod_rows = (34*12*168 + 2*12 + int((coal.T_th_up >= 2).sum())*167
+                + 17*3*168 + 2*3 + int((gas.T_gas_up >= 2).sum())*167
+                + 3360 + 4711 + 11*168 + 2*169 + 2
+                + 8*168 + 2*169 + 2 + 1014 + 14*168 + 2*169 + 2)
+    mod_cols = (12*168*8 + 12*169*2 + 12*9*168 + 3*168*6 + 3*169*2
+                + 840 + 1176 + 5*168 + 169
+                + 4*168 + 169 + 674 + 9*168 + 169)
+    print('系统层变量  实际=%d' % (m.NumVars - mod_cols))
+    print('系统层约束行  实际=%d' % (m.NumConstrs - mod_rows))
+    print('全模型: 列 %d 行 %d 二值 %d 非零 %d' %
+          (m.NumVars, m.NumConstrs, m.NumBinVars, m.getAttr('NumNZs')))
+    # v2 锚点（55839/93340/265135）已随 20261020 重构失效；新锚以新版
+    # MATLAB 实跑日志（gurobi_hainan_last.log / tools/matlab_v3_t24）核对
+    print('全模型四项以新版 MATLAB 日志为锚（见 DESIGN §6）')

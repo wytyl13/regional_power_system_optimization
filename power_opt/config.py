@@ -10,11 +10,12 @@
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parent
-MATLAB_DIR = PROJECT_DIR.parent / "海南2030算例20261014" / "海南2030算例"
+MATLAB_DIR = PROJECT_DIR.parent / "海南2030算例_20261021"
 
 UNIT_FILE = MATLAB_DIR / "分区机组信息表.xlsx"
 PROFILE_FILE = MATLAB_DIR / "运行数据.xlsx"
 SYSTEM_FILE = MATLAB_DIR / "算例系统参数.xlsx"
+EXCEL_TEMPLATE = MATLAB_DIR / "模型输出结果.xlsx"  # 模板A列顺序（新版 §12.1）
 RESULT_DIR = PROJECT_DIR / "results"
 
 T = 168
@@ -29,10 +30,21 @@ MIP_FOCUS = 1
 HEURISTICS = 0.2
 DUAL_REDUCTIONS = 0
 
+# 新版 §1.1 松弛-固定与两阶段参数（T>RF_WINDOW_HOURS 才生效；T≤168 行为同 v2）
+SOLVER_PHASE1_RATIO = 0.3
+RF_WINDOW_HOURS = 168
+RF_STEP_HOURS = 168
+RF_WINDOW_TIME_LIMIT = 60
+RF_WINDOW_MIPGAP = MIGAP
+RF_ACCEPT_GAP = 2 * MIGAP
+RF_RETRY_FACTOR = 3
+
 # 省间互济开关，测试数据不包含
 USE_INTERPROVINCIAL = False
 # 既定跨区送电，国家宏观调控，测试数据不包含
 USE_FIXED_TRANSFER   = False
+# 新版 §12.1：true 导出模型输出结果_逐小时.xlsx（汇总+明细）；false 关闭
+EXPORT_EXCEL_RESULTS = True
 
 # MATLAB_REF = {
 #     1:  dict(rows=5974,   cols=4012,  nz=16554,  obj=13983472.76616,

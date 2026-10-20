@@ -75,11 +75,11 @@ def upload_dataset(xlsx: Path) -> str:
         BASE + "/api/datasets", data=body, method="POST",
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
     with urllib.request.urlopen(req, timeout=120) as resp:
-        return json.loads(resp.read().decode("utf-8"))["datasetId"]
+        return json.loads(resp.read().decode("utf-8"))["data"]["datasetId"]
 
 
 def main() -> int:
-    """上传模版 → 提交计算 → 轮询到终态 → 四项核对 + views 契约断言 → 落盘结果。
+    """上传模版 → 提交计算 → 轮询到终态 → 四项核对 + 瘦身契约断言 → 落盘结果。
 
     Returns:
         int: 0 = PASS，1 = 失败。
@@ -93,12 +93,12 @@ def main() -> int:
     print(f"上传 OK: datasetId={ds_id}")
     job = post("/api/jobs", {"datasetId": ds_id,
                              "config": {"scenario": {"hours": hours}}})
-    job_id = job["jobId"]
+    job_id = job["data"]["jobId"]
     print(f"提交 OK: jobId={job_id}（{hours}h，单队列串行，T24 约半分钟）")
 
     while True:                                   # 轮询到终态（queued→running→solved/failed）
         time.sleep(5)
-        st = get(f"/api/jobs/{job_id}")
+        st = get(f"/api/jobs/{job_id}")["data"]
         print(f"  [{time.strftime('%H:%M:%S')}] {st['status']}")
         if st["status"] == "solved":
             break
@@ -106,25 +106,34 @@ def main() -> int:
             print(f"失败: {st.get('error')}")
             return 1
 
-    result = get(f"/api/jobs/{job_id}/results")
-    four = result["fourItems"]                    # 黄金规则：先核对四项再谈结论
+    four = st["fourItems"]                        # 黄金规则：先核对四项再谈结论
     assert four["constraints"]["rows"] > 0 and four["objective"]["value"] is not None, four
     print("四项核对: 变量 %d（binary %d）/ 约束 %d / %s / obj %.2f 元" % (
         four["variables"]["count"], four["variables"]["binary"],
         four["constraints"]["rows"], four["status"],
         four["objective"]["value"]))
+
+    result = get(f"/api/jobs/{job_id}/results")["data"]
+    # v3 瘦身契约（2026-10-20 定稿）：顶层只剩任务标识 + result
+    assert set(result) == {"jobId", "datasetId", "area", "year",
+                           "submittedAt", "finishedAt", "result"}, set(result)
     r = result["result"]
-    # views 契约：9 tab、同构 {title, note?, panels[]}、panel type 4 种
+    assert set(r) == {"report", "config", "views"}, set(r)
+    # views 契约：list，series/lines 各带 sheet_name/index/data
     v = r["views"]
-    assert set(v) == {"positionChart", "deviceOperation", "cost", "thermal",
-                      "storage_ps", "storage_es", "storage_fr",
-                      "deviceSummary", "renewable"}, set(v)
-    for tab, tv in v.items():
-        assert tv["title"] and tv["panels"], tab
-        for p in tv["panels"]:
-            assert p["type"] in {"stacked", "line", "bar", "heatmap"}, (tab, p)
-    assert set(r) >= {"meta", "report", "positionChart", "time", "labels",
-                      "series", "costs", "analysis", "views"}, set(r)
+    assert isinstance(v, list) and len(v) == 1, v
+    for part in ("series", "lines"):
+        b = v[0][part]
+        assert b["sheet_name"] == "逐小时结果", b
+        assert b["index"] and b["data"], b
+        for col in b["data"]:
+            assert set(col) == {"column_name", "data"}, col
+            assert len(col["data"]) == len(b["index"]), col["column_name"]
+    names = {c["column_name"] for c in v[0]["series"]["data"]}
+    assert names == {"煤电", "气电", "生物质", "核电", "径流式水电", "库容式水电",
+                     "风电", "光伏", "抽水蓄能", "电化学储能", "友好电站"}, names
+    lines = {c["column_name"] for c in v[0]["lines"]["data"]}
+    assert lines == {"原始负荷", "响应后负荷"}, lines
     out_path.write_text(json.dumps(result, ensure_ascii=False, indent=1),
                         encoding="utf-8")
     print("已写入: %s（%.1f KB）" % (out_path, out_path.stat().st_size / 1024))

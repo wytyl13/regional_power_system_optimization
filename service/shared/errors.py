@@ -4,7 +4,8 @@
 @Time    : 2026/10/13 17:05
 @Author  : weiyutao
 @File    : errors.py
-统一异常体系（服务内部规范；外部 HTTP 响应合同不变——仍是 FastAPI 的 {"detail": ...}）。
+统一异常体系 + 统一响应壳（2026-10-20 起 HTTP 合同改为 service-api skill §6/§7：
+所有响应（含错误）一律 {"success", "message", "data", "timestamp"} 形状）。
 
 规则：
   - 业务代码只 raise 本文件定义的异常（或让它冒出来的 ValueError，见下）
@@ -13,7 +14,28 @@
 """
 from __future__ import annotations
 
-from fastapi import HTTPException, status
+import logging
+import traceback
+from datetime import datetime
+
+from fastapi import status
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
+
+def make_response(data=None, message: str = "ok", success: bool = True) -> dict:
+    """统一响应壳（skill §6）：{"success", "message", "data", "timestamp"}。
+
+    Args:
+        data: 结果载荷（任意可 JSON 化结构；失败时为 None）。
+        message (str): 给前端的消息；失败时为可直接展示的原因。
+        success (bool): True 成功 / False 失败。
+
+    Returns:
+        dict: 统一响应体。
+    """
+    return {"success": success, "message": message, "data": data,
+            "timestamp": datetime.now().isoformat(timespec="seconds")}
 
 
 class BizError(Exception):
@@ -76,7 +98,8 @@ class ValidationError(BizError):
 
 
 def install_handlers(app) -> None:
-    """把 BizError/ValueError 统一转 HTTPException（响应形状 = FastAPI 原生）。
+    """BizError/ValueError/请求体校验/未捕获异常 → 语义化状态码 + make_response
+    形状错误体（skill §7：所有响应含错误一律统一壳，无 FastAPI 默认体漏网）。
 
     Args:
         app (FastAPI): 应用实例。
@@ -86,8 +109,26 @@ def install_handlers(app) -> None:
     """
     @app.exception_handler(BizError)
     async def _biz(request, exc: BizError):
-        raise HTTPException(exc.code, exc.message)
+        return JSONResponse(status_code=exc.code,
+                            content=make_response(message=exc.message, success=False))
 
     @app.exception_handler(ValueError)
     async def _value(request, exc: ValueError):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content=make_response(message=str(exc), success=False))
+
+    @app.exception_handler(RequestValidationError)   # Pydantic 请求体校验失败（原 FastAPI 默认体）
+    async def _req(request, exc: RequestValidationError):
+        errs = "; ".join(f"{'.'.join(map(str, e['loc'][1:])) or 'body'}: {e['msg']}"
+                         for e in exc.errors()[:3])
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content=make_response(message=f"请求参数校验失败: {errs}", success=False))
+
+    @app.exception_handler(Exception)   # 兜底：未捕获异常（原 FastAPI 默认 500 体）
+    async def _all(request, exc: Exception):
+        logging.getLogger("service").error("未捕获异常: %s\n%s", exc, traceback.format_exc())
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content=make_response(message=f"Internal Server Error: {exc}", success=False))

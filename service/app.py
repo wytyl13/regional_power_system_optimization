@@ -32,11 +32,11 @@ from pathlib import Path
 from typing import Optional
 
 # 须在 import power_opt（连带 gurobipy/matplotlib）之前设好
-os.environ.setdefault("GRB_LICENSE_FILE", r"C:\gurobi1103\win64\bin\gurobi.lic")
+os.environ.setdefault("GRB_LICENSE_FILE", r"C:\gurobi1300\win64\bin\gurobi.lic")
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Request, UploadFile
+from fastapi import FastAPI, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -44,9 +44,10 @@ from assemble import RunConfig, po_AnalysisExport, po_run
 from convert import _included, _pick, convert
 from defaults import FIXED_PARAMS, build_form, merge_config
 from parse_template import parse_template
-from position_chart import build_position_chart, build_report
-from shared.errors import (ConflictError, NotFoundError, ValidationError,
-                           install_handlers)
+from position_chart import build_report
+from sheet_views import build_sheet_views
+from shared.errors import (BizError, ConflictError, NotFoundError, ValidationError,
+                           install_handlers, make_response)
 from tree import build_categories, read_curve
 
 HERE = Path(__file__).resolve().parent
@@ -60,7 +61,7 @@ app.add_middleware(   # 跨域放行（开发期全放；上线改 allow_origins
     allow_methods=["*"],
     allow_headers=["*"],
 )
-install_handlers(app)   # BizError/ValueError → HTTPException，路由端点不写 try/except
+install_handlers(app)   # BizError/ValueError/请求体校验/兜底 → 统一壳，路由端点不写 try/except
 
 DATASETS: dict[str, dict] = {}      # datasetId → {path, parsed, area, year, uploadedAt}
 JOBS: dict[str, dict] = {}          # jobId → 状态（内存注册表，v1 不做重启持久化）
@@ -90,10 +91,10 @@ async def upload_dataset(file: Optional[UploadFile] = None):
         （不传 file 时仅 config/fixedParams）。
     """
     if file is None or not file.filename:      # 不传 file → 只返回基础配置（无模版，无 datasetId）
-        return {"config": build_form(merge_config(None), ["平水年", "枯水年"]),
-                "fixedParams": FIXED_PARAMS}
+        return make_response({"config": build_form(merge_config(None), ["平水年", "枯水年"]),
+                              "fixedParams": FIXED_PARAMS})
     if not file.filename.endswith(".xlsx"):
-        raise HTTPException(400, "只接受 .xlsx 模版文件")
+        raise BizError("只接受 .xlsx 模版文件", 400)   # 参数错 400（skill §7），走统一壳
     ds_id = "ds_" + uuid.uuid4().hex[:12]
     ds_dir = DATASETS_DIR / ds_id
     ds_dir.mkdir(parents=True, exist_ok=True)
@@ -142,11 +143,11 @@ async def upload_dataset(file: Optional[UploadFile] = None):
 
     DATASETS[ds_id] = {"path": str(path), "parsed": parsed,
                        "area": parsed["area"], "year": year, "uploadedAt": _now()}
-    return {"datasetId": ds_id, "area": parsed["area"], "year": year,
-            "categories": categories,
-            "config": build_form(defaults, hydrology),
-            "fixedParams": FIXED_PARAMS,
-            "warnings": warnings, "excludedUnits": excluded}
+    return make_response({"datasetId": ds_id, "area": parsed["area"], "year": year,
+                          "categories": categories,
+                          "config": build_form(defaults, hydrology),
+                          "fixedParams": FIXED_PARAMS,
+                          "warnings": warnings, "excludedUnits": excluded})
 
 
 # ============ GET /api/datasets/{id}/curves/{sheet}（懒加载）============
@@ -163,12 +164,14 @@ def dataset_curve(ds_id: str, sheet: str, request: Request):
         request (Request): FastAPI 请求（query 参数即筛选键值）。
 
     Returns:
-        dict: {columns, rows}（剔除筛选键列）。
+        dict: view 同款结构 {sheet_name, index, data}（无 series/lines 区分，
+        首保留列=index、其余列=data 各一列，详见 tree.read_curve）。
     """
     ds = DATASETS.get(ds_id)
     if ds is None:
         raise NotFoundError(f"dataset 不存在: {ds_id}")
-    return read_curve(ds["path"], sheet, dict(request.query_params))   # 筛选失败 → ValueError → 422
+    return make_response(                    # 筛选失败 → ValueError → 422
+        read_curve(ds["path"], sheet, dict(request.query_params)))
 
 
 # ============ POST /api/jobs ============
@@ -247,7 +250,7 @@ def create_job(req: JobRequest):
     JOBS[job_id] = {"jobId": job_id, "datasetId": req.datasetId, "status": "queued",
                     "userConfig": req.config, "submittedAt": _now(), "jobDir": str(job_dir)}
     QUEUE.put(job_id)
-    return {"jobId": job_id}
+    return make_response({"jobId": job_id})
 
 
 # ============ GET 任务列表 / 状态 / 结果 ============
@@ -287,14 +290,18 @@ def _disk_summary(job_dir: Path, with_report: bool = False) -> dict:
     sol = job_dir / "solution.json"
     if sol.exists():
         d = json.loads(sol.read_text(encoding="utf-8"))
-        sc = d["effectiveConfig"]["scenario"]
+        # 2026-10-20 瘦身后 fourItems/scenario 不在 solution.json，改读 meta.json 侧车
+        meta_path = job_dir / "meta.json"
+        meta = json.loads(meta_path.read_text(encoding="utf-8")) \
+            if meta_path.exists() else {}
+        sc = meta.get("scenario", {})
         out = {"jobId": job_id, "datasetId": d.get("datasetId"), "status": "solved",
                "submittedAt": d.get("submittedAt") or submitted,
                "finishedAt": d.get("finishedAt"),
                "area": d.get("area"), "year": d.get("year"),
                "scenario": {k: sc.get(k) for k in ("hours", "startTime", "hydrology",
                                                    "interprovincial", "interRegionTransfer")},
-               "fourItems": d.get("fourItems")}
+               "fourItems": meta.get("fourItems")}
         if with_report:
             out["report"] = d.get("result", {}).get("report")
         return out
@@ -327,7 +334,7 @@ def list_jobs():
                 if s:
                     jobs.append(s)
     jobs.sort(key=lambda j: j.get("submittedAt") or "", reverse=True)   # 新→旧
-    return {"jobs": jobs[:5]}
+    return make_response({"jobs": jobs[:5]})
 
 
 @app.get("/api/jobs/{job_id}")
@@ -344,7 +351,7 @@ def job_status(job_id: str):
     if job is None:
         d = _job_dir(job_id)     # 历史任务（重启后内存态丢失），从盘上还原
         if d is not None:
-            return _disk_summary(d, with_report=True)
+            return make_response(_disk_summary(d, with_report=True))
         raise NotFoundError(f"job 不存在: {job_id}")
     out = {k: job[k] for k in ("jobId", "datasetId", "status", "submittedAt")
            if k in job}
@@ -357,7 +364,7 @@ def job_status(job_id: str):
         out["error"] = job["error"]
         out["userConfig"] = job["userConfig"]   # 失败时把请求参数带回，前端可自查
         out["startedAt"] = job.get("startedAt")
-    return out
+    return make_response(out)
 
 
 @app.get("/api/jobs/{job_id}/results")
@@ -380,7 +387,7 @@ def job_results(job_id: str):
         if d is None or not (d / "solution.json").exists():
             raise NotFoundError(f"job 不存在: {job_id}")
         path = d / "solution.json"
-    return json.loads(path.read_text(encoding="utf-8"))
+    return make_response(json.loads(path.read_text(encoding="utf-8")))
 
 
 # ============ 串行队列 worker（单线程，同时只解一个）============
@@ -399,7 +406,7 @@ def _run_job(job_id: str):
     ds = DATASETS[job["datasetId"]]
     job["status"], job["startedAt"] = "running", _now()
     job_dir = Path(job["jobDir"])
-    summary = convert(ds["parsed"], job["userConfig"], job_dir)   # 三份中间表（配置注入）
+    convert(ds["parsed"], job["userConfig"], job_dir)   # 三份中间表（配置注入；不进返回值）
 
     cfg = merge_config(job["userConfig"])
     # 4 个模板浮出键不在 DEFAULT_CONFIG，按 convert 同语义补（用户未给 → 模板收资值），
@@ -428,30 +435,33 @@ def _run_job(job_id: str):
     if four["objective"]["value"] is None:
         raise RuntimeError(f"求解无可行解（{four['status']}），"
                            f"日志: 见 {job_dir} 下 gurobi_py_T{inp.time.T}.log")
-    # v2：前端件在 service 侧组装（结果.json 已瘦身为算法对拍件，不再回读）。
-    # report/positionChart 是前端独有口径；views 其余 tab 与五表由算法侧 AnalysisExport 出
+    # 黄金规则四项核对（solution.json 已瘦身不带四项，落日志 + meta.json 侧车）
+    print("四项核对: 变量 %d（binary %d）/ 约束 %d 行 / %s / obj %.2f 元" % (
+        four["variables"]["count"], four["variables"]["binary"],
+        four["constraints"]["rows"], four["status"],
+        four["objective"]["value"]))
+    # v3（2026-10-20 用户裁决瘦身）：solution.json 只留 任务标识 + report/config/views；
+    # fourItems/effectiveConfig/convertSummary/costs/time/analysis 已删（重复数据）。
     ae = po_AnalysisExport(inp, solution)
     metrics = ae.metrics()
     result = {
         "report": build_report(inp, solution, metrics, sc["hydrology"]),
-        "time": [t.strftime("%Y-%m-%d %H:%M:%S") for t in inp.time.Time],
-        "costs": solution.costs,          # 成本分项（六表取值用）
+        # config：与 /api/datasets 下发的 config 同格式（build_form 表单结构），值为本次生效配置
+        "config": build_form(cfg, sorted({k[1] for k in ds["parsed"]["hydroCurves"]})),
+        # views：前端唯一渲染入口（list：series/lines 各带 sheet_name/index/data）
+        "views": build_sheet_views(solution),
     }
     job["report"] = result["report"]
-    result["analysis"] = ae.build_analysis()
-    # config：与 /api/datasets 下发的 config 同格式（build_form 表单结构），值为本次生效配置
-    result["config"] = build_form(cfg, sorted({k[1] for k in ds["parsed"]["hydroCurves"]}))
-    # views：前端唯一渲染入口（{title,note?,panels[]}，panel type 4 种）。
-    # positionChart 前端独有 → service 侧注入；其余 8 tab 算法侧组装透传
-    result["views"] = ae.build_views()
-    result["views"]["positionChart"] = build_position_chart(inp, solution)
-    solution = {"jobId": job_id, "datasetId": job["datasetId"],
-                "area": ds["area"], "year": ds["year"],
-                "submittedAt": job["submittedAt"], "finishedAt": _now(),
-                "fourItems": four, "effectiveConfig": cfg,
-                "convertSummary": summary, "result": result}
+    payload = {"jobId": job_id, "datasetId": job["datasetId"],
+               "area": ds["area"], "year": ds["year"],
+               "submittedAt": job["submittedAt"], "finishedAt": _now(),
+               "result": result}
     (job_dir / "solution.json").write_text(
-        json.dumps(solution, ensure_ascii=False, default=str), encoding="utf-8")
+        json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
+    # 服务内部状态还原侧车（重启后任务列表/状态页用，不进返回值）
+    (job_dir / "meta.json").write_text(
+        json.dumps({"fourItems": four, "scenario": sc}, ensure_ascii=False),
+        encoding="utf-8")
     job["status"], job["finishedAt"] = "solved", _now()
 
 

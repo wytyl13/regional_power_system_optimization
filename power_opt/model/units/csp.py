@@ -53,14 +53,16 @@ INF = gp.GRB.INFINITY
 
 @dataclass
 class CspVars:
-    """MATLAB 2.11 节决策变量的镜像：5 连续 + 5 二值 + 储热量（N×T+1）。"""
+    """MATLAB 2.11 节决策变量的镜像：5 连续 + 4 二值 + 储热量（N×T+1）。
+    新版 760：放热状态取表达式 u_csp_out = 1 - u_csp_in，不再单独建二值变量。"""
     P_csp_unit: gp.MVar     # 发电功率，MWe
     u_csp: gp.MVar; v_csp: gp.MVar; w_csp: gp.MVar   # 运行/启动/停机状态
     Q_csp_in: gp.MVar       # 充热功率，MWt
     Q_csp_out: gp.MVar      # 放热功率，MWt
     Q_csp_curt: gp.MVar     # 弃热功率，MWt
     Q_csp_pg: gp.MVar       # 进入汽轮机热功率，MWt
-    u_csp_in: gp.MVar; u_csp_out: gp.MVar    # 充/放热状态
+    u_csp_in: gp.MVar       # 充热状态，二值
+    u_csp_out: object       # 放热状态表达式 1-u_csp_in
     E_csp: gp.MVar          # 储热量，MWht（N×T+1）
 
 
@@ -172,7 +174,7 @@ class Csp:
         Q_csp_curt = m.addMVar((N, T), lb=-INF, name="Q_csp_curt")     # 671
         Q_csp_pg = m.addMVar((N, T), lb=-INF, name="Q_csp_pg")         # 672
         u_csp_in = m.addMVar((N, T), vtype=gp.GRB.BINARY, name="u_csp_in")    # 673
-        u_csp_out = m.addMVar((N, T), vtype=gp.GRB.BINARY, name="u_csp_out")  # 674
+        u_csp_out = 1 - u_csp_in                   # 新版 760：放热状态为表达式
         E_csp = m.addMVar((N, T + 1), lb=-INF, name="E_csp")           # 675
         self.vars = CspVars(P_csp_unit=P_csp_unit, u_csp=u_csp, v_csp=v_csp,
                             w_csp=w_csp, Q_csp_in=Q_csp_in, Q_csp_out=Q_csp_out,
@@ -209,10 +211,9 @@ class Csp:
         m.addConstr(var.Q_csp_curt >= 0, name="heat_curt_pos") # Math: Q_{csp,i,t}^{curt} \ge 0（弃热功率非负）
         m.addConstr(var.Q_csp_pg >= 0, name="heat_pg_pos") # Math: Q_{csp,i,t}^{pg} \ge 0（汽轮机吸热非负）
 
-        # ---- MATLAB 917-919：充/放热上限×状态、充放互斥、充热≤集热 ----
+        # ---- MATLAB 1031-1033：充/放热上限×状态（u_out=1-u_in 表达式，互斥行已删）、充热≤集热 ----
         m.addConstr(var.Q_csp_in <= rp(csp.HEAT_CH_MAX) * var.u_csp_in, name="heat_in_max") # Math: Q_{csp,i,t}^{in} \le \bar{Q}_{csp,i}^{in} u_{csp,i,t}^{in}（充热功率上限约束）
-        m.addConstr(var.Q_csp_out <= rp(csp.HEAT_DIS_MAX) * var.u_csp_out, name="heat_out_max") # Math: Q_{csp,i,t}^{out} \le \bar{Q}_{csp,i}^{out} u_{csp,i,t}^{out}（放热功率上限约束）
-        m.addConstr(var.u_csp_in + var.u_csp_out <= 1, name="heat_mutex") # Math: u_{csp,i,t}^{in} + u_{csp,i,t}^{out} \le 1（充放热互斥约束）
+        m.addConstr(var.Q_csp_out <= rp(csp.HEAT_DIS_MAX) * var.u_csp_out, name="heat_out_max") # Math: Q_{csp,i,t}^{out} \le \bar{Q}_{csp,i}^{out} (1 - u_{csp,i,t}^{in})（放热功率上限约束，单整数互斥）
         m.addConstr(var.Q_csp_in <= csp.Q_csp_sf, name="heat_in_sf") # Math: Q_{csp,i,t}^{in} \le Q_{csp,i,t}^{sf}（充热不得超过集热功率）
 
         # ---- MATLAB 920-922：储热量平衡（热损 + 充放热效率）----
@@ -283,15 +284,15 @@ if __name__ == "__main__":
     cs.add_vars(m)
     m.update()
     N, T = csp.N_csp, csp.Q_csp_sf.shape[1]
-    exp_cols = 10*N*T + N*(T+1)        # 10 个 N×T 块 + E_csp N×(T+1)
+    exp_cols = 9*N*T + N*(T+1)         # 9 个 N×T 块 + E_csp N×(T+1)（u_out 为表达式）
     print('变量列数  期望=%d  实际=%d' % (exp_cols, m.NumVars))
-    print('二值变量  期望=%d  实际=%d' % (5*N*T, m.NumBinVars))
-    assert m.NumVars == exp_cols and m.NumBinVars == 5*N*T, '变量清单与推导不符'
+    print('二值变量  期望=%d  实际=%d' % (4*N*T, m.NumBinVars))
+    assert m.NumVars == exp_cols and m.NumBinVars == 4*N*T, '变量清单与推导不符'
     print('光热变量清单核对通过')
 
     cs.add_constraints(m, inp)
     m.update()
-    exp_rows = 19*N*T + 4*N            # 17 个 N×T 块 + 储热上下限 2N(T+1) + 初末 2N
+    exp_rows = 18*N*T + 4*N            # 16 个 N×T 块（互斥行已删） + 储热上下限 2N(T+1) + 初末 2N
     print('光热约束行数  期望=%d  实际=%d' % (exp_rows, m.NumConstrs))
     assert m.NumConstrs == exp_rows, '行数与手推账本不符'
     print('光热约束账本核对通过')

@@ -50,11 +50,12 @@ INF = gp.GRB.INFINITY
 
 @dataclass
 class GasVars:
-    """MATLAB 2.2 节决策变量的镜像，共 8 个。"""
+    """MATLAB 2.2 节决策变量的镜像，共 8 个。v/w 取 [0,1] 连续
+    （启停成本非负时），负启停成本输入自动恢复 0/1（MATLAB 683-688）。"""
     P_gas: gp.MVar        # 实际出力，MW
     u_gas: gp.MVar        # 运行状态，0/1
-    v_gas: gp.MVar        # 启动状态，0/1
-    w_gas: gp.MVar        # 停机状态，0/1
+    v_gas: gp.MVar        # 启动状态，[0,1] 连续
+    w_gas: gp.MVar        # 停机状态，[0,1] 连续
     V_gas_count: gp.MVar  # 时段边界累计启动次数（N×(T+1)）
     W_gas_count: gp.MVar  # 时段边界累计停机次数（N×(T+1)）
     R_gas_hot: gp.MVar    # 热备用，MW
@@ -184,8 +185,13 @@ class Gas:
         N, T = gas.N_gas, gas.m_gas.shape[1]
         P_gas       = m.addMVar((N, T),     lb=-INF, name="P_gas")
         u_gas       = m.addMVar((N, T),     vtype=gp.GRB.BINARY, name="u_gas")
-        v_gas       = m.addMVar((N, T),     vtype=gp.GRB.BINARY, name="v_gas")
-        w_gas       = m.addMVar((N, T),     vtype=gp.GRB.BINARY, name="w_gas")
+        # 新版 683-688：启停成本非负时 v/w 取 [0,1] 连续（规则同煤电）
+        if np.any(np.r_[gas.c_gas_start, gas.c_gas_stop] < 0):
+            v_gas   = m.addMVar((N, T),     vtype=gp.GRB.BINARY, name="v_gas")
+            w_gas   = m.addMVar((N, T),     vtype=gp.GRB.BINARY, name="w_gas")
+        else:
+            v_gas   = m.addMVar((N, T),     lb=-INF, name="v_gas")
+            w_gas   = m.addMVar((N, T),     lb=-INF, name="w_gas")
         V_gas_count = m.addMVar((N, T + 1), lb=-INF, name="V_gas_count")
         W_gas_count = m.addMVar((N, T + 1), lb=-INF, name="W_gas_count")
         R_gas_hot   = m.addMVar((N, T),     lb=-INF, name="R_gas_hot")
@@ -221,6 +227,9 @@ class Gas:
         if T > 1:
             m.addConstr(u[:, 1:] - u[:, :-1] == v[:, 1:] - w[:, 1:], name="logic") # Math: u_{i,t} - u_{i,t-1} = v_{i,t} - w_{i,t}（常规时段启停逻辑约束）
 
+        # 新版 854：v/w 连续化后显式钉非负下界（行数账本 +2·N·T）
+        m.addConstr(v >= 0, name="vlb") # Math: v_{i,t} \ge 0（启动状态非负约束，连续化后显式下界）
+        m.addConstr(w >= 0, name="wlb") # Math: w_{i,t} \ge 0（停机状态非负约束，连续化后显式下界）
         m.addConstr(v + w <= 1, name="vw") # Math: v_{i,t} + w_{i,t} \le 1（同一时段不能同时启动和停机互斥约束）
         m.addConstr(u <= 1 - dt, name="um") # Math: u_{i,t} \le 1 - m_{i,t}（计划检修状态必须停机约束）
 
@@ -252,6 +261,19 @@ class Gas:
                         + SU[:, 1:] * (u[:, 1:] - u_prev), name="ramp_up") # Math: P_{gas,i,t} - P_{gas,i,t-1} \le R_{gas,i}^{U} u_{i,t-1} + S_{gas,i}^{U} (u_{i,t} - u_{i,t-1})（常规时段向上爬坡约束）
             m.addConstr(P_prev - P[:, 1:] <= RD[:, 1:] * u[:, 1:]
                         + SD[:, 1:] * (u_prev - u[:, 1:]), name="ramp_dn") # Math: P_{gas,i,t-1} - P_{gas,i,t} \le R_{gas,i}^{D} u_{i,t} + S_{gas,i}^{D} (u_{i,t-1} - u_{i,t})（常规时段向下爬坡约束）
+
+        # ---- 新版 867-874：启停时段出力有效不等式（最小开机≥2h 机组，首时段不加启动项）----
+        tight = gas.T_gas_up >= 2
+        if tight.any() and T > 1:
+            ti = np.where(tight)[0]
+            idx = np.ix_(ti, np.arange(T - 1))
+            startCoef = _col_repmat(gas, np.maximum(gas.P_gas_max - gas.SU_gas, 0.0), T - 1)
+            startCoef[:, 0] = 0.0
+            sdCoef = _col_repmat(gas, np.maximum(gas.P_gas_max - gas.SD_gas, 0.0), T - 1)
+            m.addConstr(P[idx] <= PmaxU[idx] * u[idx]
+                        - startCoef[ti] * v[idx]
+                        - sdCoef[ti] * w[np.ix_(ti, np.arange(1, T))],
+                        name="tight_ineq") # Math: P_{gas,i,t} \le P_{gas,i}^{max} u_{i,t} - (P_{gas,i}^{max} - S_{gas,i}^{U})^+ v_{i,t} - (P_{gas,i}^{max} - S_{gas,i}^{D})^+ w_{i,t+1}（启停时段出力有效不等式，收紧松弛不改可行域）
 
         # ---- MATLAB 759-761：累计启停量递推 ----
         Vc, Wc = var.V_gas_count, var.W_gas_count
@@ -315,7 +337,7 @@ if __name__ == "__main__":
     m.update()
     N, T = gas.N_gas, gas.m_gas.shape[1]
     exp_cols = N*T*6 + N*(T+1)*2      # 6个N×T块 + 2个N×(T+1)
-    exp_bins = N*T*3                  # u/v/w
+    exp_bins = N*T                    # u（v/w 连续化）
     print('变量列数  期望=%d  实际=%d' % (exp_cols, m.NumVars))
     print('二值变量  期望=%d  实际=%d' % (exp_bins, m.NumBinVars))
     assert m.NumVars == exp_cols and m.NumBinVars == exp_bins, '变量清单与推导不符'
@@ -323,8 +345,15 @@ if __name__ == "__main__":
 
     ga.add_constraints(m, inp)
     m.update()
-    exp_rows = 15*N*T + 2*N           # 15个N×T块 + count初值2N；锁定行0（INIT_HOURS已核）
-    exp_nz = 37*N*T - 3*N             # 结构化账本：江苏 N=124,T=24→109740、海南 N=3,T=168→18639 均吻合
+    n_tight = int((gas.T_gas_up >= 2).sum())
+    exp_rows = 17*N*T + 2*N + n_tight*(T-1)   # 15块 + v/w下界2块 + 有效不等式；锁定行0（INIT_HOURS已核）
+    # 有效不等式非零元按数据计：v/w 系数 (Pmax−SU/SD)^+ 为 0 时该项从行中消失
+    # （海南气电 P_gas_max=SU=SD → 退化为 P≤Pmax·u，每行仅 P、u 2 元，同 YALMIP 导出）
+    sc = np.maximum(gas.P_gas_max - gas.SU_gas, 0.0)
+    sdc = np.maximum(gas.P_gas_max - gas.SD_gas, 0.0)
+    tight_nz = sum((2 + (sdc[i] > 0)) * (T - 1) + (sc[i] > 0) * (T - 2)
+                   for i in np.where(gas.T_gas_up >= 2)[0])
+    exp_nz = 39*N*T - 3*N + tight_nz          # 基础块 + 有效不等式（首列 v 系数已置 0）
     # （rem>0 触发锁定行时行数会超出公式，MATLAB 同构造；默认起点已核无锁定行）
     print('气电约束行数  期望=%d  实际=%d' % (exp_rows, m.NumConstrs))
     print('气电非零元  期望=%d  实际=%d' % (exp_nz, m.getAttr('NumNZs')))

@@ -45,9 +45,11 @@ INF = gp.GRB.INFINITY
 
 @dataclass
 class ESVars:
-    """MATLAB 2.5 节决策变量的镜像，共 6 个。"""
+    """MATLAB 2.5 节决策变量的镜像。新版 708：放电状态取表达式
+    u_es_dis = 1 - u_es_ch（非充电即允许放电），不再单独建二值变量。"""
     P_es_charge: gp.MVar; P_es_discharge: gp.MVar   # 充/放电功率，MW
-    u_es_ch: gp.MVar; u_es_dis: gp.MVar             # 充/放电状态，二值
+    u_es_ch: gp.MVar                                 # 充电状态，二值
+    u_es_dis: object                                 # 放电状态表达式 1-u_es_ch
     E_es: gp.MVar                                    # 首列初始，后续时段末
     R_es_hot: gp.MVar                                # 热备用，MW
 
@@ -142,7 +144,7 @@ class Electrochemical:
         P_es_charge    = m.addMVar((N, T), lb=-INF, name="P_es_charge")
         P_es_discharge = m.addMVar((N, T), lb=-INF, name="P_es_discharge")
         u_es_ch  = m.addMVar((N, T), vtype=gp.GRB.BINARY, name="u_es_ch")
-        u_es_dis = m.addMVar((N, T), vtype=gp.GRB.BINARY, name="u_es_dis")
+        u_es_dis = 1 - u_es_ch                    # 新版 708：放电状态为表达式
         E_es     = m.addMVar((N, T + 1), lb=-INF, name="E_es")
         R_es_hot = m.addMVar((N, T), lb=-INF, name="R_es_hot")
         self.vars = ESVars(P_es_charge=P_es_charge, P_es_discharge=P_es_discharge,
@@ -175,12 +177,10 @@ class Electrochemical:
         # ---- MATLAB 820：0 <= P_ch、P_ch <= Pmax·u_ch ----
         m.addConstr(0 <= Pch, name="Pch_lb") # Math: P_{c,i,t} \ge 0（充电功率非负约束）
         m.addConstr(Pch <= Pmax * uch, name="Pch_ub") # Math: P_{c,i,t} \le P_{es,i}^{max} u_{ch,i,t}（充电状态功率上限约束）
-        # ---- MATLAB 821：0 <= P_dis、P_dis <= Pmax·u_dis ----
+        # ---- MATLAB 938：0 <= P_dis、P_dis <= Pmax·u_dis（u_dis=1-u_ch 表达式，互斥行已删）----
         m.addConstr(0 <= Pdis, name="Pdis_lb") # Math: P_{d,i,t} \ge 0（放电功率非负约束）
-        m.addConstr(Pdis <= Pmax * udis, name="Pdis_ub") # Math: P_{d,i,t} \le P_{es,i}^{max} u_{dis,i,t}（放电状态功率上限约束）
-        # ---- MATLAB 822：充放互斥 ----
-        m.addConstr(uch + udis <= 1, name="mutex") # Math: u_{ch,i,t} + u_{dis,i,t} \le 1（同一时段不能同时充电和放电互斥约束）
-        # ---- MATLAB 823：SOC 递推（含自放电 1-loss；充 +、放 −）----
+        m.addConstr(Pdis <= Pmax * udis, name="Pdis_ub") # Math: P_{d,i,t} \le P_{es,i}^{max} (1 - u_{ch,i,t})（放电状态功率上限约束，单整数互斥）
+        # ---- MATLAB 939：SOC 递推（含自放电 1-loss；充 +、放 −）----
         loss = np.repeat(es.loss_es[:, None], T, axis=1)
         eta_ch = np.repeat(es.eta_es_ch[:, None], T, axis=1)
         inv_eta_dis = np.repeat((1.0 / es.eta_es_dis)[:, None], T, axis=1)
@@ -243,8 +243,8 @@ if __name__ == "__main__":
     ech.add_vars(m)
     m.update()
     N = es.N_es
-    exp_cols = 4 * N * T + N * (T + 1) + N * T   # 4 个 N×T + E_es + R_hot
-    exp_bin = 2 * N * T
+    exp_cols = 4 * N * T + N * (T + 1)           # 3 个 N×T 连续 + E_es + R_hot（u_dis 为表达式）
+    exp_bin = N * T
     print('变量列数  期望=%d  实际=%d' % (exp_cols, m.NumVars))
     print('二值变量  期望=%d  实际=%d' % (exp_bin, m.NumBinVars))
     assert m.NumVars == exp_cols and m.NumBinVars == exp_bin, '变量清单与推导不符'
@@ -252,10 +252,10 @@ if __name__ == "__main__":
 
     ech.add_constraints(m, inp)
     m.update()
-    exp_rows = 9 * N * T + 2 * N * (T + 1) + 2 * N   # 9 块 + E 界×2 + 首末×2
-    # 逐块每行元数：Pch/Pdis lb=1、ub=2、互斥=2、递推=4、R_lb=1、R_ub=3、
-    # R_energy=2 → 18/行；江苏 N=1,T=24→484、海南 N=1,T=168→3364 均吻合
-    exp_nz = 18 * N * T + 2 * N * (T + 1) + 2 * N
+    exp_rows = 8 * N * T + 2 * N * (T + 1) + 2 * N   # 8 块（互斥行已删） + E 界×2 + 首末×2
+    # 逐块每行元数：Pch/Pdis lb=1、ub=2、递推=4、R_lb=1、R_ub=3、R_energy=2
+    # → 16/行（新版：无互斥行）
+    exp_nz = 16 * N * T + 2 * N * (T + 1) + 2 * N
     print('电储能约束行数  期望=%d  实际=%d' % (exp_rows, m.NumConstrs))
     assert m.NumConstrs == exp_rows, '行数与手推账本不符'
     print('电储能非零元  期望=%d  实际=%d' % (exp_nz, m.getAttr('NumNZs')))

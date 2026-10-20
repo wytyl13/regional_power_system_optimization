@@ -51,20 +51,21 @@ INF = gp.GRB.INFINITY
 @dataclass
 class ThermalVars:
     """MATLAB 2.1 节决策变量的镜像。
-    lambda_th/segment_th 合并为 (N,6,T)/(N,5,T) 整块，对应 MATLAB 172 个 cell；
-    数学行为等价（下标 [i,:,t] == lambda_th{i}(:,t)）。"""
+    delta_th/z_th 合并为 (N,5,T)/(N,4,T) 整块，对应 MATLAB 逐台 cell；
+    下标 [i,:,t] == delta_th{i}(:,t)。v/w 取 [0,1] 连续（启停成本非负时），
+    负启停成本输入自动恢复 0/1（MATLAB 658-663）。"""
     P_th: gp.MVar        # 机组实际出力，MW
     u_th: gp.MVar        # 运行状态，0/1
-    v_th: gp.MVar        # 启动状态，0/1
-    w_th: gp.MVar        # 停机状态，0/1
+    v_th: gp.MVar        # 启动状态，[0,1] 连续
+    w_th: gp.MVar        # 停机状态，[0,1] 连续
     V_th_count: gp.MVar  # 时段边界累计启动次数（N×(T+1)）
     W_th_count: gp.MVar  # 时段边界累计停机次数（N×(T+1)）
     R_th_hot: gp.MVar    # 热备用，MW
     R_th_cold: gp.MVar   # 冷备用，MW
     F_th: gp.MVar        # 燃料成本速率，元/h
     CO2_th: gp.MVar      # 排放速率，t/h
-    lambda_th: gp.MVar   # 六节点权重 (N,6,T)
-    segment_th: gp.MVar  # 五段选择，0/1 (N,5,T)
+    delta_th: gp.MVar    # 五段增量功率 (N,5,T)，MW
+    z_th: gp.MVar        # 前 4 段是否用满，0/1 (N,4,T)
 
 
 def _col_repmat(coal: CoalInputs, col: np.ndarray, T: int) -> np.ndarray:
@@ -257,36 +258,43 @@ class Thermal:
         """
         coal = self.inputs
         N, T = coal.N_th, coal.m_th.shape[1]
-        P_th       = m.addMVar((N, T),     lb=-INF, name="P_th")              
+        P_th       = m.addMVar((N, T),     lb=-INF, name="P_th")
         u_th       = m.addMVar((N, T),     vtype=gp.GRB.BINARY, name="u_th")
-        v_th       = m.addMVar((N, T),     vtype=gp.GRB.BINARY, name="v_th")
-        w_th       = m.addMVar((N, T),     vtype=gp.GRB.BINARY, name="w_th")
+        # 新版 655-663：启停成本非负时 v/w 取 [0,1] 连续（只在 u 上分支），负值输入恢复 0/1
+        if np.any(np.r_[coal.c_th_start, coal.c_th_stop] < 0):
+            v_th   = m.addMVar((N, T),     vtype=gp.GRB.BINARY, name="v_th")
+            w_th   = m.addMVar((N, T),     vtype=gp.GRB.BINARY, name="w_th")
+        else:
+            v_th   = m.addMVar((N, T),     lb=-INF, name="v_th")
+            w_th   = m.addMVar((N, T),     lb=-INF, name="w_th")
         V_th_count = m.addMVar((N, T + 1), lb=-INF, name="V_th_count")
         W_th_count = m.addMVar((N, T + 1), lb=-INF, name="W_th_count")
         R_th_hot   = m.addMVar((N, T),     lb=-INF, name="R_th_hot")
         R_th_cold  = m.addMVar((N, T),     lb=-INF, name="R_th_cold")
         F_th       = m.addMVar((N, T),     lb=-INF, name="F_th")
         CO2_th     = m.addMVar((N, T),     lb=-INF, name="CO2_th")
-        lambda_th  = m.addMVar((N, 6, T),  lb=-INF, name="lambda_th")
-        segment_th = m.addMVar((N, 5, T),  vtype=gp.GRB.BINARY, name="segment_th")
+        # 新版 671-678：分段线性增量式 δ+z（取代 λ 权重 + 段选择）
+        delta_th   = m.addMVar((N, 5, T),  lb=-INF, name="delta_th")
+        z_th       = m.addMVar((N, 4, T),  vtype=gp.GRB.BINARY, name="z_th")
         self.vars = ThermalVars(P_th=P_th, u_th=u_th, v_th=v_th, w_th=w_th,
                                 V_th_count=V_th_count, W_th_count=W_th_count,
                                 R_th_hot=R_th_hot, R_th_cold=R_th_cold,
                                 F_th=F_th, CO2_th=CO2_th,
-                                lambda_th=lambda_th, segment_th=segment_th)
+                                delta_th=delta_th, z_th=z_th)
         return self.vars
 
     def add_constraints(self, m: gp.Model, inp: Inputs, sv=None) -> None:
-        """一比一对照 MATLAB 3.1 节（686-737）添加煤电约束。行数账本
-        （T=24 → 132,440 行）：22 个 N×T 块 90,816 + count 初值 344 +
-        λ≥0 24,768 + λ桥 16,512。煤电不交叉引用系统变量与公共输入，
+        """一比一对照 MATLAB 3.1 节（783-848）添加煤电约束。行数账本：
+        15 个 N×T 块 + count 初值 2N + v/w 下界 2·N·T + 有效不等式
+        N_tight×(T-1) + 增量式分段 17·N·T（δ≥0 5 块、δ₁≤dP₁·u、
+        δ≥dP·z、δ≤dP·z、P/F/CO2 三桥）。煤电不交叉引用系统变量与公共输入，
         胖签名入参忽略。
 
         Args:
             m (gp.Model): Gurobi 模型。
             inp (Inputs): 系统公共输入（本单元忽略）。
             sv (SystemVars): 系统层决策变量（本单元忽略）。
-            
+
         Returns:
             None
         """
@@ -301,6 +309,9 @@ class Thermal:
         if T > 1:
             m.addConstr(u[:, 1:] - u[:, :-1] == v[:, 1:] - w[:, 1:], name="logic") # Math: u_{i,t} - u_{i,t-1} = v_{i,t} - w_{i,t}（常规时段启停逻辑约束）
 
+        # 新版 787：v/w 连续化后显式钉非负下界（行数账本 +2·N·T）
+        m.addConstr(v >= 0, name="vlb") # Math: v_{i,t} \ge 0（启动状态非负约束，连续化后显式下界）
+        m.addConstr(w >= 0, name="wlb") # Math: w_{i,t} \ge 0（停机状态非负约束，连续化后显式下界）
         m.addConstr(v + w <= 1, name="vw") # Math: v_{i,t} + w_{i,t} \le 1（同一时段不能同时启动和停机互斥约束）
         m.addConstr(u <= 1 - dt, name="um") # Math: u_{i,t} \le 1 - m_{i,t}（计划检修状态必须停机约束）
 
@@ -330,6 +341,19 @@ class Thermal:
             m.addConstr(P_prev - P[:, 1:] <= RD[:, 1:] * u[:, 1:]
                         + SD[:, 1:] * (u_prev - u[:, 1:]), name="ramp_dn") # Math: P_{th,i,t-1} - P_{th,i,t} \le R_{th,i}^{D} u_{i,t} + S_{th,i}^{D} (u_{i,t-1} - u_{i,t})（常规时段向下爬坡约束）
 
+        # ---- 新版 799-809：启停时段出力有效不等式（最小开机≥2h 机组，首时段不加启动项）----
+        tight = coal.T_th_up >= 2
+        if tight.any() and T > 1:
+            ti = np.where(tight)[0]
+            idx = np.ix_(ti, np.arange(T - 1))
+            startCoef = _col_repmat(coal, np.maximum(coal.P_th_max - coal.SU_th, 0.0), T - 1)
+            startCoef[:, 0] = 0.0
+            sdCoef = _col_repmat(coal, np.maximum(coal.P_th_max - coal.SD_th, 0.0), T - 1)
+            m.addConstr(P[idx] <= PmaxU[idx] * u[idx]
+                        - startCoef[ti] * v[idx]
+                        - sdCoef[ti] * w[np.ix_(ti, np.arange(1, T))],
+                        name="tight_ineq") # Math: P_{th,i,t} \le P_{th,i}^{max} u_{i,t} - (P_{th,i}^{max} - S_{th,i}^{U})^+ v_{i,t} - (P_{th,i}^{max} - S_{th,i}^{D})^+ w_{i,t+1}（启停时段出力有效不等式，收紧松弛不改可行域）
+
         # ---- MATLAB 704-706：累计启停量递推 ----
         Vc, Wc = var.V_th_count, var.W_th_count
         m.addConstr(Vc[:, 0] == 0, name="Vinit"); m.addConstr(Wc[:, 0] == 0, name="Winit") # Math: V_{i,0} = 0, \ W_{i,0} = 0（周期起点累计启停次数清零约束）
@@ -350,30 +374,28 @@ class Thermal:
         m.addConstr(Vc[:, 1:] - Vc[np.arange(N)[:, None], firstU] <= u, name="minup") # Math: \sum_{\tau=t-T_{up}+1}^{t} v_{i,\tau} \le u_{i,t}（最小连续开机时间约束）
         m.addConstr(Wc[:, 1:] - Wc[np.arange(N)[:, None], firstD] <= 1 - u, name="mindn") # Math: \sum_{\tau=t-T_{dn}+1}^{t} w_{i,\tau} \le 1 - u_{i,t}（最小连续停机时间约束）
 
-        # ---- MATLAB 724-737：五段分段线性（SOS2 等价）----
-        lam, seg = var.lambda_th, var.segment_th
-        m.addConstr(lam >= 0, name="lam_lb") # Math: \lambda_{i,t,k} \ge 0（权重变量非负约束）
-        m.addConstr(lam.sum(axis=1) == u, name="lam_sum") # Math: \sum_{k=1}^{6} \lambda_{i,t,k} = u_{i,t}（分段线性化节点权重之和等于启停状态约束）
-        
-        # P/F/CO2 = node·λ：N×T 个"行"约束，六节点混合权重（MATLAB 730-732）。
-        # gurobipy 的 MVar@MVar 出 2 维，这里 λ 是 3 维，按机器维度循环第 3 维（时段）实现"每台每时刻一条"。
-        # P/F/CO2 = node·λ：每台每时刻一条（MATLAB 730-732）。
-        # gurobipy 的 3D MVar 矩阵乘按 N² 展开行（实测），故逐台 quicksum；
-        # 4128 条/块 实测 7 秒级，一次性建 3 块。
-        K = lam.shape[1]
-        for t in range(T):
-            lam_t = lam[:, :, t]                       # N×6 截面（2D MVar）
-            for i in range(N):
-                m.addConstr(P[i, t] == gp.quicksum(lam_t[i, k] * coal.P_th_node[i, k] for k in range(K)),
-                            name=f"Pnode_{t}_{i}") # Math: P_{th,i,t} = \sum_{k=1}^{6} \lambda_{i,t,k} P_{th,i,k}^{node}（节点权重表达实际有功出力约束）
-                m.addConstr(var.F_th[i, t] == gp.quicksum(lam_t[i, k] * coal.F_th_node[i, k] for k in range(K)),
-                            name=f"Fnode_{t}_{i}") # Math: F_{th,i,t} = \sum_{k=1}^{6} \lambda_{i,t,k} F_{th,i,k}^{node}（节点权重表达燃料成本约束）
-                m.addConstr(var.CO2_th[i, t] == gp.quicksum(lam_t[i, k] * coal.CO2_th_node[i, k] for k in range(K)),
-                            name=f"Cnode_{t}_{i}") # Math: E_{th,i,t}^{CO2} = \sum_{k=1}^{6} \lambda_{i,t,k} E_{th,i,k}^{CO2,node}（节点权重表达碳排放量约束）
-        m.addConstr(seg.sum(axis=1) == u, name="seg_sum") # Math: \sum_{s=1}^{5} z_{i,t,s} = u_{i,t}（区段指示变量之和等于启停状态约束）
-        m.addConstr(lam[:, 0, :] <= seg[:, 0, :], name="lam_seg0") # Math: \lambda_{i,t,1} \le z_{i,t,1}（SOS2首节点相邻非零约束）
-        m.addConstr(lam[:, 1:5, :] <= seg[:, 0:4, :] + seg[:, 1:5, :], name="lam_seg") # Math: \lambda_{i,t,k} \le z_{i,t,k-1} + z_{i,t,k} \quad (k=2,3,4,5)（SOS2中间节点相邻非零约束）
-        m.addConstr(lam[:, 5, :] <= seg[:, 4, :], name="lam_seg5") # Math: \lambda_{i,t,6} \le z_{i,t,5}（SOS2末节点相邻非零约束）
+        # ---- 新版 832-848：五段分段线性（增量式 δ+z，取代 λ 权重 + 段选择）----
+        # 停机时各段为 0；运行时从第一节点起依次填段，前段用满(z=1)后才允许用下一段。
+        # 段宽为 0 时斜率按 0 处理；F/CO2 混合凹凸折线，须保留段整数 z。
+        delta, z = var.delta_th, var.z_th
+        for i in range(N):
+            dP = np.maximum(np.diff(coal.P_th_node[i, :]), 0.0)     # 各段功率宽度 (5,)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                slope_F = np.diff(coal.F_th_node[i, :]) / dP        # 各段燃料成本斜率
+                slope_CO2 = np.diff(coal.CO2_th_node[i, :]) / dP    # 各段排放斜率
+            slope_F[dP <= 0] = 0.0; slope_CO2[dP <= 0] = 0.0        # 段宽 0 斜率取 0
+            m.addConstr(delta[i] >= 0, name=f"pw_lb_{i}") # Math: \delta_{i,t,k} \ge 0（各段已用功率非负约束）
+            m.addConstr(delta[i, 0, :] <= dP[0] * u[i, :], name=f"pw_d0_{i}") # Math: \delta_{i,t,1} \le \Delta P_{i,1} u_{i,t}（首段增量不超过首段宽·开机状态约束）
+            m.addConstr(delta[i, 0:4, :] >= dP[0:4, None] * z[i], name=f"pw_dz_{i}") # Math: \delta_{i,t,k} \ge \Delta P_{i,k} z_{i,t,k}（前 4 段用满则增量不低于段宽约束）
+            m.addConstr(delta[i, 1:5, :] <= dP[1:5, None] * z[i], name=f"pw_dz2_{i}") # Math: \delta_{i,t,k+1} \le \Delta P_{i,k+1} z_{i,t,k}（后 4 段增量不超过段宽·前段用满约束）
+            m.addConstr(P[i, :] == coal.P_th_node[i, 0] * u[i, :] + delta[i].sum(axis=0),
+                        name=f"pw_P_{i}") # Math: P_{th,i,t} = P_{th,i,1}^{node} u_{i,t} + \sum_{k=1}^{5} \delta_{i,t,k}（增量式表达实际出力约束）
+            m.addConstr(var.F_th[i, :] == coal.F_th_node[i, 0] * u[i, :]
+                        + gp.quicksum(slope_F[k] * delta[i, k, :] for k in range(5)),
+                        name=f"pw_F_{i}") # Math: F_{th,i,t} = F_{th,i,1}^{node} u_{i,t} + \sum_{k=1}^{5} s_{i,k}^{F} \delta_{i,t,k}（增量式表达燃料成本约束）
+            m.addConstr(var.CO2_th[i, :] == coal.CO2_th_node[i, 0] * u[i, :]
+                        + gp.quicksum(slope_CO2[k] * delta[i, k, :] for k in range(5)),
+                        name=f"pw_CO2_{i}") # Math: E_{th,i,t}^{CO2} = E_{th,i,1}^{CO2,node} u_{i,t} + \sum_{k=1}^{5} s_{i,k}^{CO2} \delta_{i,t,k}（增量式表达碳排放量约束）
 
     def add_cost(self, dt: float, econ) -> dict:
         """镜像 MATLAB 4.1 节（1016-1025）汇总煤电成本表达式。
@@ -420,8 +442,8 @@ if __name__ == "__main__":
     th.add_vars(m)
     m.update()
     N, T = coal.N_th, coal.m_th.shape[1]
-    exp_cols = N*T*8 + N*(T+1)*2 + N*6*T + N*5*T   # 8个N×T块 + 2个N×(T+1) + lambda + segment
-    exp_bins = N*T*3 + N*5*T                       # u/v/w + segment
+    exp_cols = N*T*8 + N*(T+1)*2 + N*5*T + N*4*T   # 8个N×T块 + 2个N×(T+1) + delta + z
+    exp_bins = N*T + N*4*T                         # u + z（v/w 连续化）
     print('变量列数  期望=%d  实际=%d' % (exp_cols, m.NumVars))
     print('二值变量  期望=%d  实际=%d' % (exp_bins, m.NumBinVars))
     assert m.NumVars == exp_cols and m.NumBinVars == exp_bins, '变量清单与推导不符'
@@ -429,6 +451,7 @@ if __name__ == "__main__":
 
     th.add_constraints(m, inp)
     m.update()
-    exp_rows = 32*N*T + 2*N           # 结构化账本：江苏 N=172,T=24→132440、海南 N=12,T=168→64536 均吻合
+    n_tight = int((coal.T_th_up >= 2).sum())
+    exp_rows = 34*N*T + 2*N + n_tight*(T-1)  # 新版账本：15块 + v/w下界2块 + 有效不等式 + 增量式分段17块
     print('煤电约束行数  期望=%d  实际=%d' % (exp_rows, m.NumConstrs))
     print('煤电非零元: %d（海南 v2 全模型四项以 gurobi_hainan_last.log 为锚）' % m.getAttr('NumNZs'))

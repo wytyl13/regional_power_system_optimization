@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import gurobipy as gp
 from datetime import datetime
@@ -58,7 +60,8 @@ def build(m: gp.Model, inp: reader.Inputs):
         inst.load(inp)
         insts.append(inst)
     V = [inst.add_vars(m) for inst in insts]
-    Sv = CT.add_vars(m, inp)
+    # 新版：ps_area 传入判多台抽蓄分区（单台分区不建分区方向整数，对齐 YALMIP 导出）
+    Sv = CT.add_vars(m, inp, ps_area=insts[4].inputs.area_ps)
     reg = CT.RegisteredUnits(thermal=V[0], gas=V[1], nuclear=V[2], biomass=V[3],
                              pumped_storage=V[4], electrochemical=V[5],
                              hydro=V[6], friendly=V[7], csp=V[8])
@@ -163,8 +166,40 @@ def add_objective(m: gp.Model, inp: reader.Inputs, insts: list, Sv: CT.SystemVar
     }
 
 
+def _integer_hour_map(m: gp.Model, insts: list, Sv: CT.SystemVars, T: int) -> dict:
+    """新版 1239-1248：整数列 → 仿真小时（1 基）；未识别的整数列不进映射，
+    松弛-固定各窗口对其始终保持整数。
+
+    Args:
+        m (gp.Model): Gurobi 模型（需已 update）。
+        insts (list): UNITS 序单元实例列表（build 产出）。
+        Sv (SystemVars): 系统层决策变量。
+        T (int): 时段数。
+
+    Returns:
+        dict: gurobipy Var → 小时序号（1..T）。
+    """
+    # UNITS 序：0煤 1气 2核 3生 4抽蓄 5电储 6水 7友好 8光热
+    thv, gav, esv, frv, psv = (insts[0].vars, insts[1].vars, insts[5].vars,
+                               insts[7].vars, insts[4].vars)
+    cspv = insts[8].vars
+    # MATLAB 1240-1241 integerBlocks（u_ps_area 单台分区为 None，跳过）
+    blocks = [thv.u_th, gav.u_gas, esv.u_es_ch, frv.u_fr_ch, psv.u_ps_gen, psv.u_ps_pump,
+              Sv.u_ps_area_gen, Sv.u_ps_area_pump, cspv.u_csp, cspv.u_csp_in, thv.z_th]
+    hour = {}
+    for block in blocks:
+        if block is None:
+            continue
+        for t in range(1, T + 1):
+            for v in block[..., t - 1].reshape(-1).tolist():   # z_th 三维，末维=小时统一展平
+                hour[v] = t
+    return hour
+
+
 def solve(inp: reader.Inputs) -> Solution:
     """组装 + 求解 + 取值；返回 Solution（纯数据），不做前端口径组装。
+    新版 §5 求解策略（T>RF_WINDOW_HOURS 才走松弛-固定/两阶段；
+    T≤168 与 v2 行为一致：MIPFocus=1、Heuristics=0.2 直接求解）。
 
     Args:
         inp (Inputs): 系统公共输入。
@@ -172,7 +207,8 @@ def solve(inp: reader.Inputs) -> Solution:
     Returns:
         Solution: 求解结果（无可行解时抛 RuntimeError）。
     """
-    m = gp.Model("coal_gas_nuc_bio_sto_hyd_fr_T%d" % inp.time.T)
+    T = inp.time.T
+    m = gp.Model("coal_gas_nuc_bio_sto_hyd_fr_T%d" % T)
     insts, V, Sv = build(m, inp)
     cost_exprs = add_objective(m, inp, insts, Sv)
     m.update()
@@ -183,15 +219,92 @@ def solve(inp: reader.Inputs) -> Solution:
     run_dir.mkdir(parents=True, exist_ok=True)
     config.RESULT_DIR = run_dir
 
-    # 设置求解参数镜像 MATLAB 1164-1168
+    # 基本参数镜像新版 gurobiBaseParams（1235-1236）
     m.Params.MIPGap = config.MIGAP
-    m.Params.TimeLimit = config.TIME_LIMIT
-    m.Params.MIPFocus = config.MIP_FOCUS
-    m.Params.Heuristics = config.HEURISTICS
     m.Params.DualReductions = config.DUAL_REDUCTIONS
     m.Params.Threads = 1        # 单线程锁定多最优解
     m.Params.Seed = 0           # 显式固定随机种子（默认即 0，防御性声明）
-    m.Params.LogFile = str(config.RESULT_DIR / ("gurobi_py_T%d.log" % inp.time.T))
+    m.Params.LogFile = str(config.RESULT_DIR / ("gurobi_py_T%d.log" % T))
+    solve_t0 = time.perf_counter()
+    elapsed = lambda: time.perf_counter() - solve_t0
+
+    # ---- 新版 1250-1289：松弛-固定分窗构造起点（T>窗口长才走）----
+    start_x = None
+    mutated = None
+    if T > config.RF_WINDOW_HOURS:
+        hour = _integer_hour_map(m, insts, Sv, T)
+        int_vars = [v for v in m.getVars() if v.VType in (gp.GRB.BINARY, gp.GRB.INTEGER)]
+        mutated = {v: (v.VType, v.lb, v.ub) for v in int_vars}   # 备份，最终求解前恢复
+        step = min(config.RF_STEP_HOURS, config.RF_WINDOW_HOURS)
+        starts = list(range(1, T + 1, step))                      # 1 基小时
+        # MATLAB 1254：仅当前一窗已覆盖到 T 时丢弃其后窗（避免冗余窗）
+        starts = [s for i, s in enumerate(starts)
+                  if i == 0 or starts[i - 1] + config.RF_WINDOW_HOURS - 1 < T]
+        for k, first in enumerate(starts):
+            last = min(T, first + config.RF_WINDOW_HOURS - 1)
+            for v in int_vars:
+                vt, lb, ub = mutated[v]
+                v.VType = vt; v.lb = lb; v.ub = ub    # 每窗先复位基础列类型（MATLAB 每窗用模型副本）
+                h = hour.get(v, 0)                    # 再套本窗规则：未来松弛、过去固定
+                if h > last:
+                    v.VType = gp.GRB.CONTINUOUS
+                elif 0 < h < first:
+                    val = float(round(start_x[v]))
+                    v.lb = val
+                    v.ub = val
+            tl = max(10, min(config.RF_WINDOW_TIME_LIMIT, config.TIME_LIMIT - elapsed()))
+            m.Params.TimeLimit = tl
+            m.Params.MIPFocus = 1
+            m.Params.MIPGap = config.RF_WINDOW_MIPGAP
+            m.optimize()
+            accepted = m.SolCount > 0 and (m.Status == gp.GRB.OPTIMAL
+                                           or m.getAttr("MIPGap") <= config.RF_ACCEPT_GAP)
+            # 窗口超时且间隙过大：以当前解为起点、时限放宽 RF_RETRY_FACTOR 倍重求（1274-1279）
+            if not accepted and config.TIME_LIMIT - elapsed() > tl:
+                if m.SolCount > 0:
+                    for v in m.getVars():
+                        v.Start = v.X
+                tl = min(config.RF_RETRY_FACTOR * tl, config.TIME_LIMIT - elapsed())
+                m.Params.TimeLimit = tl
+                print("松弛-固定第%d窗间隙未达%.2f%%，放宽时限至%.0fs重求。"
+                      % (k + 1, 100 * config.RF_ACCEPT_GAP, tl))
+                m.optimize()
+                accepted = m.SolCount > 0 and (m.Status == gp.GRB.OPTIMAL
+                                               or m.getAttr("MIPGap") <= config.RF_ACCEPT_GAP)
+            if not accepted:
+                print("松弛-固定第%d窗（%d-%dh）未得到合格解，改用MIP搜索起点。"
+                      % (k + 1, first, last))
+                start_x = None
+                break
+            start_x = {v: v.X for v in m.getVars()}
+            print("松弛-固定第%d/%d窗（%d-%dh）完成，累计%.1fs。"
+                  % (k + 1, len(starts), first, last, elapsed()))
+        # 恢复原模型：最终求解不固定任何变量（MATLAB 每窗用模型副本，此处恢复等效）
+        for v, (vt, lb, ub) in mutated.items():
+            v.VType = vt
+            v.lb = lb
+            v.ub = ub
+
+    # ---- 新版 1291-1299：松弛-固定失败退回阶段1（侧重找可行解）----
+    if start_x is None and T > config.RF_WINDOW_HOURS:
+        m.Params.TimeLimit = config.SOLVER_PHASE1_RATIO * config.TIME_LIMIT
+        m.Params.MIPFocus = 1
+        m.Params.Heuristics = 0.2
+        m.optimize()
+        if m.SolCount > 0:
+            start_x = {v: v.X for v in m.getVars()}
+
+    # ---- 新版 1300-1310：最终求解 ----
+    m.Params.MIPGap = config.MIGAP
+    m.Params.TimeLimit = max(10, config.TIME_LIMIT - elapsed())
+    if start_x is None:
+        m.Params.MIPFocus = 1            # 短周期：直接侧重找可行解（v2 行为）
+        m.Params.Heuristics = 0.2
+    else:
+        for v in m.getVars():            # 仅作起点，不固定任何变量
+            v.Start = start_x[v]
+        m.Params.MIPFocus = 3            # 加强割平面，提升下界
+        m.Params.Heuristics = 0.05
     m.optimize()
 
     # ---- 四项核对 ----

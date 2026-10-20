@@ -4,10 +4,11 @@
 @Time    : 2026/09/28 11:30
 @Author  : weiyutao
 @File    : plot.py
-设备运行图：一比一对照 MATLAB §七（synergy_hainan_30.m 1192-1299 行）。
+设备运行图：一比一对照新版 MATLAB §七（synergy_hainan_30.m 1399-1523 行）。
 MATLAB 行号注释在每段上方；颜色逐行抄 plotColors，布局抄 tiledlayout/legend 参数。
 海南 v2：友好电站 4 列接真值（风/光列=直送+站内充，放电正、充电负）、
 '失负荷补偿'→'未供电负荷'、分区图加 if Narea>1 守卫（单分区不出分区图）。
+新版 20261020：风电拆陆上/海上两列（第 7/22 列），plotStackOrder 重排 22 列。
 """
 from __future__ import annotations
 
@@ -24,24 +25,32 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 from power_opt import reader
 
-# MATLAB 1203-1206 plotDeviceNames（21 列，顺序即堆叠顺序）
-DEVICE_NAMES = ['煤电', '气电', '生物质', '径流式水电', '库容式水电',
-                '核电', '风电', '光伏', '光热', '友好电站风电', '友好电站光伏', '友好电站放电',
-                '抽蓄发电', '电化学储能放电', '抽蓄抽水', '电化学储能充电', '友好电站充电',
-                '省内净交换', '省间互济', '既定跨区输电', '未供电负荷']
-# MATLAB 1207-1214 plotColors（RGB 0-1，逐行抄；充电列与放电列同色，靠正负半轴区分）
-DEVICE_COLORS = np.array([
+# 新版 1410-1425 plotDeviceByType/plotDeviceNames 原始 22 列（陆上风电第 7 列、海上风电第 22 列）
+RAW_DEVICE_NAMES = ['煤电', '气电', '生物质', '径流式水电', '库容式水电',
+                    '核电', '陆上风电', '光伏', '光热', '友好电站风电', '友好电站光伏', '友好电站放电',
+                    '抽蓄发电', '电化学储能放电', '抽蓄抽水', '电化学储能充电', '友好电站充电',
+                    '省内净交换', '省间互济', '既定跨区输电', '未供电负荷', '海上风电']
+# 新版 1427-1434 plotColors（RGB 0-1，逐行抄；充电列与放电列同色，靠正负半轴区分）
+RAW_DEVICE_COLORS = np.array([
     [0.36, 0.40, 0.46], [0.75, 0.49, 0.32], [0.50, 0.62, 0.32],
     [0.36, 0.72, 0.86], [0.14, 0.48, 0.72], [0.65, 0.51, 0.72],
     [0.30, 0.66, 0.51], [0.95, 0.73, 0.25], [0.89, 0.45, 0.23],
     [0.57, 0.78, 0.64], [0.98, 0.85, 0.49], [0.76, 0.38, 0.55],
     [0.27, 0.42, 0.70], [0.38, 0.69, 0.70], [0.27, 0.42, 0.70],
     [0.38, 0.69, 0.70], [0.76, 0.38, 0.55], [0.66, 0.70, 0.76],
-    [0.49, 0.47, 0.65], [0.71, 0.63, 0.48], [0.85, 0.26, 0.30]])
+    [0.49, 0.47, 0.65], [0.71, 0.63, 0.48], [0.85, 0.26, 0.30],
+    [0.12, 0.48, 0.39]])
+# 新版 1444 plotStackOrder（0 基）：核电生物质径流 | 陆风海风友风光伏友光 | 煤电气电库容光热 |
+# 抽蓄发电电储放电友放电 | 抽蓄抽水电储充电友充电 | 交换互济跨区失负荷
+STACK_ORDER = [5, 2, 3, 6, 21, 9, 7, 10, 0, 1, 4, 8, 12, 13, 11,
+               14, 15, 16, 17, 18, 19, 20]
+DEVICE_NAMES = [RAW_DEVICE_NAMES[k] for k in STACK_ORDER]     # 重排后列名（对外口径）
+DEVICE_COLORS = RAW_DEVICE_COLORS[STACK_ORDER]                 # 颜色随设备同步移动
 
 
 def build_device_data(inp, solution):
-    """MATLAB 1188-1196 plotDeviceData：21 列设备×分区×小时，发电正/充电抽水负。
+    """新版 1410-1421 plotDeviceData：22 列设备×分区×小时，发电正/充电抽水负，
+    再按 1444 plotStackOrder 重排（陆上风电第 7 列、海上风电末列；返回序=DEVICE_NAMES）。
     光热 2026-10-16 接入（A_csp@P_csp_unit；N_csp=0 → 0 列）；
     省间互济/既定跨区：开关关闭 → 0 列（债，待开关打开）。
 
@@ -50,7 +59,7 @@ def build_device_data(inp, solution):
         solution (Solution): 求解结果。
 
     Returns:
-        np.ndarray: Narea×T×21 设备功率张量（MW，发电正/充电抽水负）。
+        np.ndarray: Narea×T×22 设备功率张量（MW，发电正/充电抽水负，已按堆叠顺序重排）。
     """
     Z = lambda *shape: np.zeros(shape)                      # 未建模电源列 = 0
     def A(n, area):                                         # 分区归属矩阵 (Narea,n)，同 solve 残差自检
@@ -62,16 +71,16 @@ def build_device_data(inp, solution):
     V = solution.values
     area = lambda name: solution.units[name]["area"]
     count = lambda name: len(solution.units[name]["keys"])
-    return np.stack([                                     # cat(3,...) 同序
+    raw = np.stack([                                     # cat(3,...) 同序（原始 22 列）
         A(count("thermal"), area("thermal")) @ V["P_th"],    # 煤电
         A(count("gas"), area("gas")) @ V["P_gas"],            # 气电
         A(count("biomass"), area("biomass")) @ V["P_bio"],   # 生物质
         A(count("hydro_ror"), area("hydro_ror")) @ V["P_hyd_ror"],  # 径流式水电
         A(count("hydro_reservoir"), area("hydro_reservoir")) @ V["P_hyd_res"],  # 库容式水电
         A(count("nuclear"), area("nuclear")) @ V["P_nuc"],    # 核电
-        V["P_wind"], V["P_pv"],
+        V["P_wind_on"], V["P_pv"],
         A(count("csp"), area("csp")) @ V["P_csp_unit"] if count("csp")
-        else Z(inp.areas.Narea, inp.time.T),                    # 风电/光伏/光热（MATLAB 1193）
+        else Z(inp.areas.Narea, inp.time.T),                    # 陆上风电/光伏/光热（新版 1413）
         A(count("friendly"), area("friendly")) @ (V["P_fr_wind_out"]
                                                   + V["P_fr_wind_ch"]),
         A(count("friendly"), area("friendly")) @ (V["P_fr_pv_out"]
@@ -83,7 +92,9 @@ def build_device_data(inp, solution):
         -A(count("electrochemical"), area("electrochemical")) @ V["P_es_charge"],
         -A(count("friendly"), area("friendly")) @ V["P_fr_charge"],
         A_line @ V["P_line"], Z(inp.areas.Narea, inp.time.T),           # 省内净交换/省间互济(开关关)
-        Z(inp.areas.Narea, inp.time.T), V["P_shed"]], axis=2)            # 既定跨区(开关关)/未供电负荷
+        Z(inp.areas.Narea, inp.time.T), V["P_shed"],                     # 既定跨区(开关关)/未供电负荷
+        V["P_wind_off"]], axis=2)                                          # 海上风电（新版第 22 列）
+    return raw[:, :, STACK_ORDER]                            # 1445：数据随堆叠顺序重排
 
 
 def _scopes(inp):
@@ -108,7 +119,7 @@ def _scopes(inp):
 
 
 def write_chart_csv(inp, solution, path=None):
-    """绘图曲线 CSV（前端复现 设备运行_*.png 用）：Time + 21 设备列 + 2 条负荷线。
+    """绘图曲线 CSV（前端复现 设备运行_*.png 用）：Time + 22 设备列 + 2 条负荷线。
     列名即 PNG 图例文字；充电/抽水/净送出列已是负值，前端正半轴堆正、负半轴堆负即可。
     全 T 行（PNG 只画前 168 小时，前端自行截取）；utf-8-sig 让中文列名 Excel 直开；
     全精度不四舍五入（同其他结果件纪律）。全 0 列（如海南的光热/省间互济）照常输出，
@@ -126,8 +137,8 @@ def write_chart_csv(inp, solution, path=None):
     V = solution.values
     P_D = inp.profiles.P_load - V["P_shift_out"] + V["P_shift_in"] \
         - V["P_cut"]                                        # MATLAB 1240 plotNetLoad
-    # 与 plot_operation 同款自检：21 列逐点合计 ≈ 响应后负荷，漏列立刻报警
-    assert np.abs(device.sum(axis=2) - P_D).max() < 1e-3, "21 列合计≠响应后负荷：有设备列漏画"
+    # 与 plot_operation 同款自检：22 列逐点合计 ≈ 响应后负荷，漏列立刻报警
+    assert np.abs(device.sum(axis=2) - P_D).max() < 1e-3, "22 列合计≠响应后负荷：有设备列漏画"
     scopes = _scopes(inp)
     sfx = lambda name: f"{name}_{scopeName}" if len(scopes) > 1 else name
     cols = {"Time": [ts.strftime("%Y-%m-%d %H:%M") for ts in inp.time.Time]}
@@ -160,8 +171,8 @@ def plot_operation(inp, solution, save_png=False):
     device = build_device_data(inp, solution)
     P_D = inp.profiles.P_load - solution.values["P_shift_out"] \
         + solution.values["P_shift_in"] - solution.values["P_cut"]
-    # 自检：21 列逐点合计 ≈ 响应后负荷（与 solve 残差同一恒等式），漏列立刻报警
-    assert np.abs(device.sum(axis=2) - P_D).max() < 1e-3, "21 列合计≠响应后负荷：有设备列漏画"
+    # 自检：22 列逐点合计 ≈ 响应后负荷（与 solve 残差同一恒等式），漏列立刻报警
+    assert np.abs(device.sum(axis=2) - P_D).max() < 1e-3, "22 列合计≠响应后负荷：有设备列漏画"
 
     # MATLAB 1217-1224：作用域列表（见 _scopes，write_chart_csv 与此处共用一份口径）
     for g, (scopeName, M) in enumerate(_scopes(inp)):
@@ -252,7 +263,7 @@ class Plot:
         return plot_operation(self.inp, self.solution, save_png=save_png)
 
     def chart_csv(self, path=None):
-        """绘图曲线 CSV（前端复现 设备运行_*.png 用）：Time + 21 设备列 + 2 条负荷线。
+        """绘图曲线 CSV（前端复现 设备运行_*.png 用）：Time + 22 设备列 + 2 条负荷线。
 
         Args:
             path: 输出路径；None 时用默认文件名。

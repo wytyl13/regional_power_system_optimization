@@ -565,21 +565,59 @@ def convert(parsed: dict, user_config: dict | None, out_dir) -> dict:
     # 风电：纳入电站按容量加权合成容量因子。
     # 曲线 sheet 的电站名是装机表名的省略写法（"海风" ↔ "海风2024度夏"），按前缀匹配。
     curveNames = sorted({k[0] for k in parsed["windCurves"]}, key=len, reverse=True)
-    st_caps = {}
+
+    # v3（20261021）：电站再按 defaults wind.classes 前缀归类陆上/海上，两类各出一页
+    # （reader 的 1.8/1.12 读这两页；聚合"风电"页保留作溯源）。
+    wind_classes = u_cfg["wind"]["classes"]
+
+    def _wind_class(nm):
+        """风电电站名 → 陆上/海上类别（前缀规则在 defaults wind.classes）。
+
+        Args:
+            nm (str): 电站名称。
+
+        Returns:
+            str: 类别 sheet 名（如 "陆上风电"）。
+        """
+        hits = [c for c, rule in wind_classes.items()
+                if any(nm.startswith(p) for p in rule["prefixes"])]
+        if len(hits) != 1:
+            raise ValueError(f"风电电站 [{nm}] 按前缀规则归不了唯一的陆上/海上类别（命中 {hits}）")
+        return hits[0]
+
+    st_caps = {}                       # 类别 → [(装机MW, 曲线名)]
     for r in wind_st:
         nm = r["电站名称"]
         cands = [cs for cs in curveNames if nm.startswith(cs)]
         if len(cands) != 1:
             raise ValueError(f"风电电站 [{nm}] 在出力曲线中匹配到 {len(cands)} 条曲线（{cands}），无法对应")
-        st_caps[nm] = (r["装机容量"] * WAN, cands[0])
-    if wind_st:
-        def _blend(d):
-            num = sum(cap * parsed["windCurves"][(cs, d.strftime("%m-%d"))][d.hour]
-                      for cap, cs in st_caps.values())
-            return num / windCapTotal
-        windFac = _hourly(_blend, "风电")
-    else:
-        windFac = np.zeros(8760)
+        st_caps.setdefault(_wind_class(nm), []).append((r["装机容量"] * WAN, cands[0]))
+
+    def _blend(caps, tot):
+        """装机容量加权合成容量因子（8760 小时）。
+
+        Args:
+            caps (list[tuple]): [(装机MW, 曲线名)]。
+            tot (float): 装机合计（MW）。
+
+        Returns:
+            np.ndarray: 8760 个小时因子。
+        """
+        return _hourly(lambda d: sum(c * parsed["windCurves"][(cs, d.strftime("%m-%d"))][d.hour]
+                                     for c, cs in caps) / tot, "风电")
+
+    all_caps = [cp for caps in st_caps.values() for cp in caps]
+    windFac = _blend(all_caps, windCapTotal) if wind_st else np.zeros(8760)
+    wind_unit_pages, wind_fac_pages = {}, {}
+    for cls, rule in wind_classes.items():
+        caps = st_caps.get(cls, [])
+        cap = sum(c for c, _ in caps)
+        # ponytail: 空类写表头空页 + 全零曲线，reader 对装机 0 的分区跳过取数
+        wind_unit_pages[cls] = pd.DataFrame(
+            [{"UnitKey": f"{prov}_WIND_{rule['key']}", "分区编号": 1, "分区名称": area,
+              "装机容量_MW": cap, "FOM_COST_PERIOD": u_cfg["wind"]["fom"],
+              "DataStatus": renewStatus}] if caps else [], columns=RENEW_COLS)
+        wind_fac_pages[cls] = _blend(caps, cap) if cap else np.zeros(8760)
     pvFac = _hourly(lambda d: parsed["pvCurves"][d.strftime("%m-%d")][d.hour], "光伏")
 
     # ============ 需求响应（周一起始周；窗口按年内数据截断）============
@@ -701,6 +739,8 @@ def convert(parsed: dict, user_config: dict | None, out_dir) -> dict:
         "径流式水电": empty(ROR_COLS),      # 收资未含，空表（loader 读表头即可）
         "光热": empty(CSP_COLS),
         "风电": wind_df, "光伏": pv_df,
+        # v3（20261021）：陆上/海上分页（reader 1.8 读这两页；聚合"风电"页保留作溯源）
+        **wind_unit_pages,
         "检修计划": pd.DataFrame(mtn, columns=MTN_COLS),
         # 供暖期设置：老师指定海南 11月15日~次年3月15日（起止含），Enabled=1（2026-10-14 MATLAB）
         "供暖期设置": pd.DataFrame(
@@ -733,6 +773,8 @@ def convert(parsed: dict, user_config: dict | None, out_dir) -> dict:
         "负荷": pd.DataFrame({"时间": dates, area: loadFac}),
         "风电": pd.DataFrame({"时间": dates, area: windFac}),
         "光伏": pd.DataFrame({"时间": dates, area: pvFac}),
+        # v3（20261021）：陆上/海上分页曲线（reader 1.12 读这两页；"风电"页保留作溯源）
+        **{cls: pd.DataFrame({"时间": dates, area: fac}) for cls, fac in wind_fac_pages.items()},
         "归一化基准": base_df,
     }
     with pd.ExcelWriter(out_dir / "运行数据.xlsx") as w:

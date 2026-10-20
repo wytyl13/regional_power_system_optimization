@@ -148,7 +148,9 @@ def build_categories(path) -> list[dict]:
 def read_curve(path, sheet: str, filters: dict[str, str]) -> dict:
     """曲线懒加载：按 CURVE_RULES[sheet] 的匹配规则筛曲线表行。
     filters = {filterBy 键: 行上单元格值}（前端从点击行取）。
-    返回 {columns, rows}，剔除筛选键列（值已在请求里）。
+    返回与任务 view 同款结构 {sheet_name, index, data}（2026-10-20 定稿，无
+    series/lines 区分）：保留列剔除筛选键列后，首列 → index（字符串），
+    其余列 → data 各一列（原值，数字不转字符串）。
     表存在但 0 数据行 → 返回空表（未收资如实展示）；
     有数据但筛选 0 命中 / prefix 有歧义 → ValueError（app.py 转 422，不造数）。
 
@@ -158,7 +160,7 @@ def read_curve(path, sheet: str, filters: dict[str, str]) -> dict:
         filters (dict[str, str]): {filterBy 键: 点击行的单元格值}。
 
     Returns:
-        dict: {columns, rows}。
+        dict: {sheet_name, index, data}（view 同款，见 docstring）。
     """
     rule_key = next((k for k, r in CURVE_RULES.items() if r[0] == sheet), None)
     if rule_key is None:
@@ -171,11 +173,12 @@ def read_curve(path, sheet: str, filters: dict[str, str]) -> dict:
         it = wb[sheet].iter_rows(values_only=True)
         header = list(next(it, None) or [])
         if all(v is None for v in header):
-            return {"columns": [], "rows": []}   # 全空 sheet：未收资，空表
+            return {"sheet_name": sheet, "index": [], "data": []}   # 全空 sheet：未收资，空表
         colIdx = {str(c): j for j, c in enumerate(header) if c is not None}
         # 筛选键若不在曲线表头（如此 sheet 无通名列），按未命中处理：传入值非空即 0 命中
         cell = lambda r, c: _s(r[colIdx[c]]) if c in colIdx and colIdx[c] < len(r) else ""
         keep = [c for c in colIdx if c not in filter_by and c not in drop]
+        raw = lambda r, c: r[colIdx[c]] if colIdx[c] < len(r) else None
         rows, total, prefix_cands = [], 0, set()
         for r in it:
             if r is None or all(v is None for v in r):
@@ -193,16 +196,22 @@ def read_curve(path, sheet: str, filters: dict[str, str]) -> dict:
                     continue
                 hit = True
             if hit:
-                rows.append({c: cell(r, c) for c in keep})
+                rows.append({c: raw(r, c) for c in keep})
+        # rows → view 同款结构：首保留列=index（字符串），其余列=data 各一列（原值）
+        def _view():
+            return {"sheet_name": sheet,
+                    "index": [_s(r[keep[0]]) for r in rows] if rows and keep else [],
+                    "data": [{"column_name": c, "data": [r[c] for r in rows]}
+                             for c in keep[1:]]}
         if not rows and not total:
-            return {"columns": keep, "rows": []}  # 只表头无数据：未收资，空表
+            return _view()   # 只表头无数据：未收资，空表（columns 保留、data 空）
         if match == "prefix" and not rows:
             raise ValueError(
                 f"电站 [{filters.get('电站名称', '')}] 在曲线表 [{sheet}] 无对应曲线"
                 f"（曲线表现有实体: {sorted(prefix_cands) or '空'}）")
         if not rows:
             raise ValueError(f"按 {filters} 筛曲线表 [{sheet}] 命中 0 行")
-        return {"columns": keep, "rows": rows}
+        return _view()
     finally:
         wb.close()
 
@@ -227,10 +236,12 @@ if __name__ == "__main__":
                     print(f"    {i['name']}.curve:", json.dumps(i["curve"], ensure_ascii=False))
         # 曲线懒加载三连：负荷（exact）/ 风电（prefix，旧模版）/ 光伏（whole）
         load_rows = read_curve(path, "负荷-8760", {"区域": "海南"})
-        assert len(load_rows["rows"]) == 365 and load_rows["columns"][0] == "日期", len(load_rows["rows"])
-        print("  负荷-8760(区域=海南) rows =", len(load_rows["rows"]))
+        assert len(load_rows["index"]) == 365 and len(load_rows["data"]) == 24, load_rows.get("sheet_name")
+        assert isinstance(load_rows["data"][0]["data"][0], float), load_rows["data"][0]["column_name"]
+        print("  负荷-8760(区域=海南) index =", len(load_rows["index"]),
+              "data cols =", len(load_rows["data"]))
         pv = read_curve(path, "光伏-出力曲线", {})
-        print("  光伏整表 rows =", len(pv["rows"]))
+        print("  光伏整表 index =", len(pv["index"]))
         try:
             read_curve(path, "风电-出力曲线", {"电站名称": "不存在的站"})
             raise AssertionError("应报 422")

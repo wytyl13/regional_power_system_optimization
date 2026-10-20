@@ -25,8 +25,12 @@ $env:PYTHONPATH = ".." ; $env:GRB_LICENSE_FILE="C:\gurobi1300\win64\bin\gurobi.l
 ## 服务
 
 ```bash
-cd ../service &&
+conda activate power_opt
+cd ../service
+python -m uvicorn app:app --port 8000
 ```
+
+> 服务须用 conda 环境 power_opt 启动；Gurobi license 路径已在 app.py 内置默认（`C:\gurobi1300\win64\bin\gurobi.lic`）。端到端接口测试：项目根目录 `python tests/test_api_job.py <模版.xlsx> [小时数]`。
 
 ## 核心算法维护与版本更新
 
@@ -198,7 +202,7 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 
 ## 汇总输出
 
-> 算法侧（power_opt）最终输出汇总，不含 service 层组装件（report / positionChart / solution.json）。
+> 算法侧（power_opt）最终输出汇总，不含 service 层组装件（report / config / views，契约见下文接口章）。
 > 数据流：`Solution`（取值，solution.py）→ `Plot`（设备运行图，plot.py）→ `AnalysisExport`（metrics / 五表 / views / 分析落盘，analysis_export.py）。
 
 ### 一、Solution（取值出口，solution.py）
@@ -296,6 +300,8 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 # 接口
 
 > http://192.168.2.40:9999/
+>
+> 所有端点（含错误）统一返回 `{"success", "message", "data", "timestamp"}` 壳（service/shared/errors.py `make_response`，2026-10-20 起；同日补齐 400 参数错 / 422 请求体校验 / 500 兜底三条路径，无 FastAPI 默认体漏网）；下述各端点示例仅展示 `data` 内容，失败时 `success=false`、原因在 `message`。
 
 ## POST /api/datasets
 
@@ -306,9 +312,9 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 
 ```json
 {
-  "datasetId": "ds_9bfeec0820e3",
-  "area": "海南",
-  "year": 2030,
+  "datasetId": "ds_9bfeec0820e3", // 必返；后续接口的任务钥匙
+  "area": "海南", // 必返；模版区域
+  "year": 2030, // 必返；模版目标年
   "categories": [
     {
       "name": "",
@@ -338,7 +344,9 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
     // ...
   ], // 需要在前端展示的用户上传的模板数据，有表格的需要渲染表格
   "config": {}, // 需要在前端展示的基础配置，支持用户修改
-  "fixedParams": [] // 需要在前端展示的基础配置，不支持用户修改
+  "fixedParams": [], // 需要在前端展示的基础配置，不支持用户修改
+  "warnings": [], // 模版解析警告
+  "excludedUnits": [] // 未纳入机组清单（含原因）
 }
 ```
 
@@ -346,13 +354,15 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 
 ```json
 {
-	"config": {}
+	"config": {}, // 必返；默认配置表单（无模版，收资浮出值为内置兜底）
+	"fixedParams": [] // 必返；服务端固定口径说明（只读展示）
 }
 ```
 
-## GET /api/datasets//curves/
+## GET /api/datasets/curves/
 
-> 曲线懒加载（按 filterBy 键值筛，需要在前端支持表格查看和导出
+> 曲线懒加载（按 filterBy 键值筛，需要在前端支持表格查看和导出）；返回结构与
+> 查看任务返回的 view 相同（2026-10-20 起），仅无 series/lines 区分：单表一块
 
 **示例：** `http://192.168.2.40:9999/api/datasets/<id>/curves/负荷-8760?区域=海南`
 
@@ -360,8 +370,14 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 
 ```json
 {
-	"columns": [],
-	"rows": []
+	"sheet_name": "负荷-8760",    // 必返；曲线 sheet 名
+	"index": ["01-01", "01-02"],  // 必返；首保留列（日期等行标列）各行的值，字符串
+	"data": [                      // 必返；其余保留列各一列（筛选键列、剔除列不在内）
+		{
+			"column_name": "0时",          // 必返；列名
+			"data": [0.577, 0.598]         // 必返；该列各行原值，数字不转字符串（空单元格为 null）
+		}
+	]
 }
 ```
 
@@ -462,42 +478,61 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 
 ## GET /api/jobs/results
 
-> 查看指定任务结果
+> 查看指定任务结果（未解完 409、无此任务 404；2026-10-20 v3 瘦身契约：顶层只剩任务标识 + result 三键）
 
 **示例1：** http://127.0.0.1:8000/api/jobs/job_20261013_145202_c677c8/results
 
-> **return**
+> **return**（任务未解完）
 
 ```json
 {
-	"detail": "任务状态 running，尚无结果"
+	"success": false,
+	"message": "任务状态 running，尚无结果",
+	"data": null,
+	"timestamp": "2026-10-20T18:34:00"
 }
 ```
 
-**示例2：** http://127.0.0.1:8000/api/jobs/job_20261013_122817_9a2f4f/results
+**示例2：** http://127.0.0.1:8000/api/jobs/job_20261020_183357_d68693/results
 
-> **return**
+> **return**（data）
 
 ```json
 {
-	"jobId": "job_20261013_122817_9a2f4f",
-	"datasetId": "ds_a7b6117e21d0",
+	"jobId": "job_20261020_183357_d68693",
+	"datasetId": "ds_04dbea9a92f5",
 	"area": "海南",
 	"year": 2030,
-	"submittedAt": "2026-10-13 12:28:17",
-	"finishedAt": "2026-10-13 12:28:29",
+	"submittedAt": "2026-10-20 18:33:57",
+	"finishedAt": "2026-10-20 18:34:12",
 	"result": {
-		"config": {},
-		"views": {
-			"deviceOperation": {
-				"title": "", # 数据名称
-				"panels": [] # 需要绘制的曲线图像
-			},
-			... # views下的其它需要渲染的图像
-		}
+		"report": {}, // 报告文本块（供状态页展示）
+		"config": {}, // 用户可改配置回显
+		"views": [ // 前端渲染入口：list，每组一张图的取数（series 功率序列 + lines 负荷参考线）
+			{
+				"series": {
+					"sheet_name": "逐小时结果", // 取数来源 sheet
+					"index": ["2030-01-01 00:00", "2030-01-01 01:00"], // T 个时间戳，与 data 等长
+					"data": [ // 需要绘制的功率序列（可多列）
+						{"column_name": "煤电", "data": [2899.0, 2899.0]},
+						{"column_name": "气电", "data": [0.0, 0.0]}
+					]
+				},
+				"lines": {
+					"sheet_name": "逐小时结果",
+					"index": ["2030-01-01 00:00", "2030-01-01 01:00"],
+					"data": [ // 叠加的负荷参考线（2 条）
+						{"column_name": "原始负荷", "data": [7191.0, 6871.0]},
+						{"column_name": "响应后负荷", "data": [7191.0, 6871.0]}
+					]
+				}
+			}
+		]
 	}
 }
 ```
+
+> views 列映射表在 [service/sheet_views.py](service/sheet_views.py) 顶部两个常量：`HOURLY_SERIES_MAP`（11 个源列 → 展示名，含抽水蓄能净出力→抽水蓄能、友好一体化电站→友好电站等）、`HOURLY_LINES_MAP`（本地负荷→原始负荷、响应后负荷两条线），增删列只改这两个常量。已删字段（2026-10-20 裁决）：fourItems / effectiveConfig / convertSummary / costs / time / analysis / 旧 9-tab views / positionChart；四项核对走任务状态端点与日志（含 job 目录 meta.json 侧车，供重启后还原）。
 
 # 工作计划
 
@@ -521,6 +556,32 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 
 <!-- 代码行号映射表 -->
 
+<!-- 分电源变量定义位置映射表（输入 → *Inputs 字段行；输出 → *Vars 字段行或 add_cost 行） -->
+
+<!-- 煤电 thermal.py -->
+
+<!-- 气电 gas.py -->
+
+<!-- 生物质 biomass.py -->
+
+<!-- 径流式水电 hydro.py -->
+
+<!-- 库容式水电 hydro.py -->
+
+<!-- 电化学储能 electrochemical.py -->
+
+<!-- 抽水蓄能 pumped_storage.py -->
+
+<!-- 风电 -->
+
+<!-- 光伏 -->
+
+<!-- 新能源友好电站 friendly.py -->
+
+<!-- 核电 nuclear.py -->
+
+<!-- 光热 csp.py（2026-10-16 接入，一比一对照 MATLAB 1.18/2.11/3.11/4.11） -->
+
 [1]: ./power_opt/model/units/thermal.py
 [2]: ./power_opt/model/units/gas.py
 [3]: ./power_opt/model/units/biomass.py
@@ -532,10 +593,6 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 [9]: ./power_opt/model/context.py
 [10]: ./power_opt/model/units/friendly.py
 [11]: ./power_opt/model/units/nuclear.py
-<!-- 分电源变量定义位置映射表（输入 → *Inputs 字段行；输出 → *Vars 字段行或 add_cost 行） -->
-
-<!-- 煤电 thermal.py -->
-
 [12]: ./power_opt/model/units/thermal.py
 [13]: ./power_opt/model/units/thermal.py
 [14]: ./power_opt/model/units/thermal.py
@@ -573,8 +630,6 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 [46]: ./power_opt/model/units/thermal.py
 [47]: ./power_opt/model/units/thermal.py
 [48]: ./power_opt/model/units/thermal.py
-<!-- 气电 gas.py -->
-
 [49]: ./power_opt/model/units/gas.py
 [50]: ./power_opt/model/units/gas.py
 [51]: ./power_opt/model/units/gas.py
@@ -595,8 +650,6 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 [66]: ./power_opt/model/units/gas.py
 [67]: ./power_opt/model/units/gas.py
 [68]: ./power_opt/model/units/gas.py
-<!-- 生物质 biomass.py -->
-
 [69]: ./power_opt/model/units/biomass.py
 [70]: ./power_opt/model/units/biomass.py
 [71]: ./power_opt/model/units/biomass.py
@@ -608,16 +661,12 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 [77]: ./power_opt/model/units/biomass.py
 [78]: ./power_opt/model/units/biomass.py
 [79]: ./power_opt/model/units/biomass.py
-<!-- 径流式水电 hydro.py -->
-
 [80]: ./power_opt/model/units/hydro.py
 [81]: ./power_opt/model/units/hydro.py
 [82]: ./power_opt/model/units/hydro.py
 [83]: ./power_opt/model/units/hydro.py
 [84]: ./power_opt/model/units/hydro.py
 [85]: ./power_opt/model/units/hydro.py
-<!-- 库容式水电 hydro.py -->
-
 [86]: ./power_opt/model/units/hydro.py
 [87]: ./power_opt/model/units/hydro.py
 [88]: ./power_opt/model/units/hydro.py
@@ -632,8 +681,6 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 [97]: ./power_opt/model/units/hydro.py
 [98]: ./power_opt/model/units/hydro.py
 [99]: ./power_opt/model/units/hydro.py
-<!-- 电化学储能 electrochemical.py -->
-
 [100]: ./power_opt/model/units/electrochemical.py
 [101]: ./power_opt/model/units/electrochemical.py
 [102]: ./power_opt/model/units/electrochemical.py
@@ -656,8 +703,6 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 [119]: ./power_opt/model/units/electrochemical.py
 [120]: ./power_opt/model/units/electrochemical.py
 [121]: ./power_opt/model/units/electrochemical.py
-<!-- 抽水蓄能 pumped_storage.py -->
-
 [122]: ./power_opt/model/units/pumped_storage.py
 [123]: ./power_opt/model/units/pumped_storage.py
 [124]: ./power_opt/model/units/pumped_storage.py
@@ -677,22 +722,16 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 [138]: ./power_opt/model/context.py
 [139]: ./power_opt/model/units/pumped_storage.py
 [140]: ./power_opt/model/units/pumped_storage.py
-<!-- 风电 -->
-
 [141]: ./power_opt/reader.py
 [142]: ./power_opt/reader.py
 [143]: ./power_opt/reader.py
 [144]: ./power_opt/model/context.py
 [145]: ./power_opt/solve.py
-<!-- 光伏 -->
-
 [146]: ./power_opt/reader.py
 [147]: ./power_opt/reader.py
 [148]: ./power_opt/reader.py
 [149]: ./power_opt/model/context.py
 [150]: ./power_opt/solve.py
-<!-- 新能源友好电站 friendly.py -->
-
 [151]: ./power_opt/model/units/friendly.py
 [152]: ./power_opt/model/units/friendly.py
 [153]: ./power_opt/model/units/friendly.py
@@ -719,8 +758,6 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 [174]: ./power_opt/model/units/friendly.py
 [175]: ./power_opt/model/units/friendly.py
 [176]: ./power_opt/model/context.py
-<!-- 核电 nuclear.py -->
-
 [177]: ./power_opt/model/units/nuclear.py
 [178]: ./power_opt/model/units/nuclear.py
 [179]: ./power_opt/model/units/nuclear.py
@@ -786,8 +823,6 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 [270]: ./power_opt/analysis_export.py
 [271]: ./power_opt/analysis_export.py
 [272]: ./power_opt/analysis_export.py
-<!-- 光热 csp.py（2026-10-16 接入，一比一对照 MATLAB 1.18/2.11/3.11/4.11） -->
-
 [273]: ./power_opt/model/units/csp.py
 [274]: ./power_opt/model/units/csp.py
 [275]: ./power_opt/model/units/csp.py

@@ -132,17 +132,21 @@ class WindPv:
     """风光装机（1.8/1.9，行空间）：分区归属、容量与周期 FOM 成本。"""
     area_wind: np.ndarray; W_capacity: np.ndarray; c_wind_FOM: np.ndarray
     area_pv: np.ndarray; PV_capacity: np.ndarray; c_pv_FOM: np.ndarray
+    W_on_cap_area: np.ndarray = None   # Narea 陆上风电分区装机（新版 1.12 拆分）
+    W_off_cap_area: np.ndarray = None  # Narea 海上风电分区装机
 
 
 @dataclass
 class Profiles:
     """分区曲线（1.10-1.12）：逐时功率矩阵 + 供周峰值复用的原始表。"""
     P_load: np.ndarray                # Narea×T 逐时负荷
-    P_wind_available: np.ndarray      # Narea×T 风电可用出力
+    P_wind_available: np.ndarray      # Narea×T 风电可用出力（陆海之和）
     P_pv_available: np.ndarray        # Narea×T 光伏可用出力
     loadData: pd.DataFrame            # 负荷原始表（周峰值复用）
     loadTime: pd.Series               # 负荷原始表时间列（同上）
     baseMap: dict                     # 分区 → 负荷全年最大值（同上）
+    P_wind_on_available: np.ndarray = None   # Narea×T 陆上风电可用出力
+    P_wind_off_available: np.ndarray = None  # Narea×T 海上风电可用出力
 
 
 @dataclass
@@ -353,7 +357,10 @@ class InputReader:
         """
         # 主要包含：风电装机容量、风电周期运维成本、光伏装机容量（MW）、光伏周期运维成本（元）
         req_w = ["分区编号", "分区名称", "装机容量_MW", "FOM_COST_PERIOD"]
-        windData = _read(config.UNIT_FILE, "风电", req_w)
+        # 新版 1.8：陆上/海上风电分页读取，行空间拼接（MATLAB windData=[on;off]）
+        windOnData = _read(config.UNIT_FILE, "陆上风电", req_w)
+        windOffData = _read(config.UNIT_FILE, "海上风电", req_w)
+        windData = pd.concat([windOnData, windOffData], ignore_index=True)
         zone_wind = [_zstr(v) for v in windData["分区编号"]]
         if miss := [z for z in zone_wind if z not in areas.areaPos]:
             raise KeyError(f"风电分区编号 {set(miss)} 不在分区表中")
@@ -363,6 +370,13 @@ class InputReader:
         # FOM_COST_PERIOD (年度功率运维成本)
         # c_wind_FOM (换算为T时刻周期的风电年度运维成本)
         c_wind_FOM = econ.fixedCostScale * windData["FOM_COST_PERIOD"].to_numpy(float)
+
+        # 新版 1.12：分区陆/海装机，同分区多行取和（MATLAB 398-399）
+        n_on = len(windOnData)
+        W_on_cap_area = np.zeros(areas.Narea)
+        np.add.at(W_on_cap_area, area_wind[:n_on], W_capacity[:n_on])
+        W_off_cap_area = np.zeros(areas.Narea)
+        np.add.at(W_off_cap_area, area_wind[n_on:], W_capacity[n_on:])
 
         pvData = _read(config.UNIT_FILE, "光伏", req_w)
         zone_pv = [_zstr(v) for v in pvData["分区编号"]]
@@ -374,7 +388,8 @@ class InputReader:
         # c_pv_FOM (换算为T时刻周期的光伏年度运维成本)
         c_pv_FOM = econ.fixedCostScale * pvData["FOM_COST_PERIOD"].to_numpy(float)
         return WindPv(area_wind=area_wind, W_capacity=W_capacity, c_wind_FOM=c_wind_FOM,
-                      area_pv=area_pv, PV_capacity=PV_capacity, c_pv_FOM=c_pv_FOM)
+                      area_pv=area_pv, PV_capacity=PV_capacity, c_pv_FOM=c_pv_FOM,
+                      W_on_cap_area=W_on_cap_area, W_off_cap_area=W_off_cap_area)
 
     # ---- 1.10-1.12 负荷/风光曲线 → 分区功率（MATLAB 270-330）----
     def load_profiles(self, time: TimeAxis, areas: Areas, wind_pv: WindPv) -> Profiles:
@@ -394,8 +409,11 @@ class InputReader:
         loadTime = _to_hours(loadData["时间"])
         loadRows = _match_rows(loadTime, time.Time, "负荷")
 
-        windCurve = _read(config.PROFILE_FILE, "风电", ["时间"] + areas.AreaName)
-        windRows = _match_rows(_to_hours(windCurve["时间"]), time.Time, "风电")
+        # 新版 1.12：陆上/海上风电曲线分页读取，分别折算分区可用出力
+        windOnCurve = _read(config.PROFILE_FILE, "陆上风电", ["时间"] + areas.AreaName)
+        windOnRows = _match_rows(_to_hours(windOnCurve["时间"]), time.Time, "陆上风电")
+        windOffCurve = _read(config.PROFILE_FILE, "海上风电", ["时间"] + areas.AreaName)
+        windOffRows = _match_rows(_to_hours(windOffCurve["时间"]), time.Time, "海上风电")
 
         pvCurve = _read(config.PROFILE_FILE, "光伏", ["时间"] + areas.AreaName)
         pvRows = _match_rows(_to_hours(pvCurve["时间"]), time.Time, "光伏")
@@ -408,27 +426,36 @@ class InputReader:
         if miss := [n for n in areas.AreaName if n not in baseMap]:
             raise KeyError(f"归一化基准缺分区行: {miss}")
 
-        # 分区域风电光伏装机容量数组
-        W_cap_area = np.zeros(areas.Narea)
-        W_cap_area[wind_pv.area_wind] = wind_pv.W_capacity
+        # 分区域风电光伏装机容量数组（陆海分列，同分区多行取和；MATLAB 393-410）
+        W_on_cap_area = wind_pv.W_on_cap_area
+        W_off_cap_area = wind_pv.W_off_cap_area
         PV_cap_area = np.zeros(areas.Narea)
         PV_cap_area[wind_pv.area_pv] = wind_pv.PV_capacity
 
         # 负荷曲线=负荷逐小时比率*负荷全年最大值（注意分区域）
-        # 风电逐小时出力=风电逐小时比率*风电装机容量（注意分区域）
+        # 风电逐小时出力=风电逐小时比率*风电装机容量（注意分区域，陆海分开）
         # 光伏逐小时出力=光伏逐小时比率*光伏装机容量（注意分区域）
         P_load = np.zeros((areas.Narea, time.T))
-        P_wind_available = np.zeros((areas.Narea, time.T))
+        P_wind_on_available = np.zeros((areas.Narea, time.T))
+        P_wind_off_available = np.zeros((areas.Narea, time.T))
         P_pv_available = np.zeros((areas.Narea, time.T))
         for r in range(areas.Narea):
             name = areas.AreaName[r]
             P_load[r, :] = loadData.loc[loadRows, name].to_numpy(float) * baseMap[name]
-            P_wind_available[r, :] = windCurve.loc[windRows, name].to_numpy(float) * W_cap_area[r]
+            if W_on_cap_area[r] > 0:
+                P_wind_on_available[r, :] = windOnCurve.loc[windOnRows, name].to_numpy(float) * W_on_cap_area[r]
+            if W_off_cap_area[r] > 0:
+                P_wind_off_available[r, :] = windOffCurve.loc[windOffRows, name].to_numpy(float) * W_off_cap_area[r]
             P_pv_available[r, :] = pvCurve.loc[pvRows, name].to_numpy(float) * PV_cap_area[r]
+
+        # 平衡及新能源总量口径取陆海之和（MATLAB 411）
+        P_wind_available = P_wind_on_available + P_wind_off_available
 
         return Profiles(P_load=P_load, P_wind_available=P_wind_available,
                         P_pv_available=P_pv_available,
-                        loadData=loadData, loadTime=loadTime, baseMap=baseMap)
+                        loadData=loadData, loadTime=loadTime, baseMap=baseMap,
+                        P_wind_on_available=P_wind_on_available,
+                        P_wind_off_available=P_wind_off_available)
 
     # ---- 1.13 省内断面（MATLAB 332-342）----
     def load_lines(self, areas: Areas) -> Lines:
