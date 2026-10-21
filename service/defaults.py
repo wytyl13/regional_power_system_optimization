@@ -37,6 +37,10 @@ DEFAULT_CONFIG = {
         "renewableUtilizationMin": 0.0,
         "co2Limit_t": 58872296.712308295,
         "reserveDuration_h": 1.0,
+        # 模板浮出键的兜底值（海南 2030 基线）：无模板时表单仍下发该字段；
+        # 上传/jobs/convert 路径模板值优先，此默认不生效
+        "hotReserveRatio": 0.1,
+        "coldReserveRatio": 0.05,
     },
     # 惩罚与排放价格（元）
     "penalties": {
