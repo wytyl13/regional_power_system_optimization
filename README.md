@@ -97,7 +97,7 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 | [model/context.py](power_opt/model/context.py)           | 系统层       | 只读 RegisteredUnits 注册表做全局约束与耦合；耦合只发生在本层，禁止把耦合逻辑塞回单元                                                                                                                                                                                        |
 | [solve.py](power_opt/solve.py)                           | 组装层       | 全项目唯一调`optimize()`、设求解参数的文件；UNITS 列表顺序 = 变量建序，冻结，新电源插入位置须对照理论文档；目标函数 = Σ各单元 add_cost + 系统残项，加法顺序冻结；每次求解后四项核对（变量规模/约束规模/求解状态/目标值）进日志再谈结论                                    |
 | [solution.py](power_opt/solution.py)                     | 取值层       | Solution 类是唯一取值出口，纯数据，不做前端口径组装；含 values / costs / four_items / slacks 及派生量；时序结果 CSV 与 结果.json 为对拍件，列集冻结                                                                                                                          |
-| [plot.py](power_opt/plot.py)                             | 出图层       | Plot 类只消费 Solution；21 设备列堆叠顺序冻结，发电为正、充电抽水为负                                                                                                                                                                                                        |
+| [plot.py](power_opt/plot.py)                             | 出图层       | Plot 类只消费 Solution；22 设备列堆叠顺序冻结，发电为正、充电抽水为负                                                                                                                                                                                                        |
 | [analysis_export.py](power_opt/analysis_export.py)       | 分析层       | AnalysisExport 只消费 (inp, solution)；metrics / 分析五表 / views / 落盘（00~07 PNG、.mat、摘要.txt）均为 MATLAB 对拍口径，冻结                                                                                                                                              |
 | [main.py](power_opt/main.py) / [run.py](power_opt/run.py) | 入口层       | main.py 为命令行全量出口（求解+存储结果保存）；run.py 为算法包对外唯一入口，服务只 import run（RunConfig → run()/run_with_outputs()），禁止 sys.path 直插、禁止外部改写 config                                                                                              |
 
@@ -108,13 +108,13 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 | 文件                               | 内容                                                                    | 产出                                                         |
 | :--------------------------------- | :---------------------------------------------------------------------- | :----------------------------------------------------------- |
 | gurobi_py_T{T}.log                 | Gurobi 求解日志                                                         | solve.py                                                     |
-| 时序结果_T{T}.csv                  | 对拍件（compare.py 硬依赖，列集冻结）                                   | [solution.py:236][267]                                       |
-| 结果.json                          | 算法对拍件：meta + four_items + costs + metrics 标量                    | [solution.py:299][268]                                       |
-| 设备运行数据_T{T}.csv              | Time + 21 设备列 + 响应后负荷 + 原始负荷（前端复现 PNG 用）             | [plot.py:92][230]                                            |
-| 设备运行_全系统.png                | §七设备运行堆叠图（默认前 168 小时）                                   | [plot.py:118][231]                                           |
-| 00_设备堆叠_N.png + 01~07 分析 PNG | 00 为设备堆叠图复制；01~07 为成本构成、火电启停、储能运行、消纳等分析图 | [analysis_export.py:912][272]、[analysis_export.py:699][269] |
-| 海南分析结果.mat                   | 19 个变量（MATLAB 对拍口径）                                            | [analysis_export.py:500][270]                                |
-| 分析摘要.txt                       | 十二节文本摘要（MATLAB 对拍口径）                                       | [analysis_export.py:613][271]                                |
+| 时序结果_T{T}.csv                  | 对拍件（compare.py 硬依赖，列集冻结）                                   | [solution.py:592][267]                                       |
+| 结果.json                          | 算法对拍件：meta + four_items + costs + metrics 标量                    | [solution.py:636][268]                                       |
+| 设备运行数据_T{T}.csv              | Time + 22 设备列 + 响应后负荷 + 原始负荷（前端复现 PNG 用）             | [plot.py:151][230]                                            |
+| 设备运行_全系统.png                | §七设备运行堆叠图（默认前 168 小时）                                   | [plot.py:231][231]                                           |
+| 00_设备堆叠_N.png + 01~07 分析 PNG | 00 为设备堆叠图复制；01~07 为成本构成、火电启停、储能运行、消纳等分析图 | [analysis_export.py:1224][272]、[analysis_export.py:901][269] |
+| 海南分析结果.mat                   | 30 个变量（MATLAB 对拍口径）                                            | [analysis_export.py:1227][270]                                |
+| 分析摘要.txt                       | 十二节文本摘要（MATLAB 对拍口径）                                       | [analysis_export.py:1228][271]                                |
 
 # 工程实现
 
@@ -209,93 +209,94 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 
 | 输出                      | 内容                                                                                                        | 位置                   |
 | ------------------------- | ----------------------------------------------------------------------------------------------------------- | ---------------------- |
-| values                    | 第四章全部输出变量取值（44 键，逐台/分区×小时），各电源明细见上方「分电源…输出数据」表[36][36]-[190][190] | [solution.py:73][222]  |
-| costs                     | 44 项成本分项（六大项及性质分解，供五表与恒等式核对）                                                       | [solution.py:174][223] |
-| four_items                | 四项核对：变量规模 / 约束规模 / 求解状态 / 目标函数值                                                       | [solution.py:57][224]  |
-| slacks                    | 最小约束残差                                                                                                | [solution.py:178][225] |
-| nuclear_available         | 派生：核电可运行状态 = 1 − m_nuc（逐台×T）                                                                | [solution.py:202][226] |
-| friendly_output           | 派生：友好站对外出力 = 风直送 + 光直送 + 放电                                                               | [solution.py:207][227] |
-| area_line_flow            | 派生：断面分区总送受 = A_line @ P_line（受入正/送出负）                                                     | [solution.py:213][228] |
-| storage_equivalent_cycles | 派生：三类储能放电侧等效循环（放电量/额定能量，逐台）                                                       | [solution.py:222][229] |
+| values                    | 第四章全部输出变量取值（69 键，逐台/分区×小时），各电源明细见上方「分电源…输出数据」表[36][36]-[190][190] | [solution.py:146][222]  |
+| costs                     | 47 项成本分项（六大项及性质分解，供五表与恒等式核对）                                                       | [solution.py:272][223] |
+| four_items                | 四项核对：变量规模 / 约束规模 / 求解状态 / 目标函数值                                                       | [solution.py:130][224]  |
+| slacks                    | 最小约束残差                                                                                                | [solution.py:276][225] |
+| nuclear_available         | 派生：核电可运行状态 = 1 − m_nuc（逐台×T）                                                                | [nuclear.py:158][226] |
+| friendly_output           | 派生：友好站对外出力 = 风直送 + 光直送 + 放电                                                               | [solution.py:300][227] |
+| area_line_flow            | 派生：断面分区总送受 = A_line @ P_line（受入正/送出负）                                                     | [solution.py:345][228] |
+| storage_equivalent_cycles | 派生：三类储能放电侧等效循环（放电量/额定能量，逐台）                                                       | [analysis_export.py:283][229] |
 
 ### 二、Plot（设备运行图，plot.py，`Plot` 类）
 
 | 输出                  | 内容                                                                               | 位置               |
 | --------------------- | ---------------------------------------------------------------------------------- | ------------------ |
-| 设备运行数据_T{T}.csv | Time + 21 设备列 + 响应后负荷 + 原始负荷（每作用域一组，全 T 行，前端复现 PNG 用） | [plot.py:92][230]  |
-| 设备运行_全系统.png   | §七设备运行堆叠图（正半轴发电、负半轴充电抽水，默认前 168 小时）                  | [plot.py:118][231] |
+| 设备运行数据_T{T}.csv | Time + 22 设备列 + 响应后负荷 + 原始负荷（每作用域一组，全 T 行，前端复现 PNG 用） | [plot.py:151][230]  |
+| 设备运行_全系统.png   | §七设备运行堆叠图（正半轴发电、负半轴充电抽水，默认前 168 小时）                  | [plot.py:231][231] |
 
-21 设备列（堆叠顺序，发电正/充电抽水负，分区×小时）：
+22 设备列（堆叠顺序，发电正/充电抽水负，分区×小时）：
 
 | #  | 数据列         | 定义                                                                     | 位置               |
 | -- | -------------- | ------------------------------------------------------------------------ | ------------------ |
-| 1  | 煤电           | 分区归属矩阵 @ P_th                                                      | [plot.py:57][232]  |
-| 2  | 气电           | 分区归属矩阵 @ P_gas                                                     | [plot.py:58][233]  |
-| 3  | 生物质         | 分区归属矩阵 @ P_bio                                                     | [plot.py:59][234]  |
-| 4  | 径流式水电     | 分区归属矩阵 @ P_hyd_ror                                                 | [plot.py:60][235]  |
-| 5  | 库容式水电     | 分区归属矩阵 @ P_hyd_res                                                 | [plot.py:61][236]  |
-| 6  | 核电           | 分区归属矩阵 @ P_nuc                                                     | [plot.py:62][237]  |
-| 7  | 风电           | P_wind                                                                   | [plot.py:63][238]  |
-| 8  | 光伏           | P_pv                                                                     | [plot.py:63][238]  |
-| 9  | 光热           | 分区归属矩阵 @ P_csp_unit（海南 N_csp=0 → 0 列；2026-10-16 接入）       | [plot.py:63][238]  |
-| 10 | 友好电站风电   | P_fr_wind_out + P_fr_wind_ch 按站分区汇总                                | [plot.py:64][239]  |
-| 11 | 友好电站光伏   | P_fr_pv_out + P_fr_pv_ch 按站分区汇总                                    | [plot.py:66][240]  |
-| 12 | 友好电站放电   | P_fr_discharge 按站分区汇总                                              | [plot.py:68][241]  |
-| 13 | 抽蓄发电       | P_ps_gen 按站分区汇总                                                    | [plot.py:69][242]  |
-| 14 | 电化学储能放电 | P_es_discharge 按站分区汇总                                              | [plot.py:70][243]  |
-| 15 | 抽蓄抽水       | − P_ps_pump 按站分区汇总                                                | [plot.py:71][244]  |
-| 16 | 电化学储能充电 | − P_es_charge 按站分区汇总                                              | [plot.py:72][245]  |
-| 17 | 友好电站充电   | − P_fr_charge 按站分区汇总                                              | [plot.py:73][246]  |
-| 18 | 省内净交换     | A_line @ P_line                                                          | [plot.py:74][247]  |
-| 19 | 省间互济       | 开关关闭，0 列                                                           | [plot.py:74][247]  |
-| 20 | 既定跨区输电   | 开关关闭，0 列                                                           | [plot.py:75][248]  |
-| 21 | 未供电负荷     | P_shed                                                                   | [plot.py:75][248]  |
-| — | 响应后负荷     | P_load − P_shift_out + P_shift_in − P_cut（图线；CSV 与 PNG 各算一处） | [plot.py:100][249] |
-| — | 原始负荷       | P_load（虚线，仅 PNG 画）                                                | [plot.py:111][250] |
+| 1  | 煤电           | 分区归属矩阵 @ P_th                                                      | [plot.py:75][232]  |
+| 2  | 气电           | 分区归属矩阵 @ P_gas                                                     | [plot.py:76][233]  |
+| 3  | 生物质         | 分区归属矩阵 @ P_bio                                                     | [plot.py:77][234]  |
+| 4  | 径流式水电     | 分区归属矩阵 @ P_hyd_ror                                                 | [plot.py:78][235]  |
+| 5  | 库容式水电     | 分区归属矩阵 @ P_hyd_res                                                 | [plot.py:79][236]  |
+| 6  | 核电           | 分区归属矩阵 @ P_nuc                                                     | [plot.py:80][237]  |
+| 7  | 风电（陆上）   | P_wind_on                                                                | [plot.py:81][238]  |
+| 8  | 光伏           | P_pv                                                                     | [plot.py:81][238]  |
+| 9  | 光热           | 分区归属矩阵 @ P_csp_unit（海南 N_csp=0 → 0 列；2026-10-16 接入）       | [plot.py:82][309]  |
+| 10 | 友好电站风电   | P_fr_wind_out + P_fr_wind_ch 按站分区汇总                                | [plot.py:84][239]  |
+| 11 | 友好电站光伏   | P_fr_pv_out + P_fr_pv_ch 按站分区汇总                                    | [plot.py:86][240]  |
+| 12 | 友好电站放电   | P_fr_discharge 按站分区汇总                                              | [plot.py:88][241]  |
+| 13 | 抽蓄发电       | P_ps_gen 按站分区汇总                                                    | [plot.py:89][242]  |
+| 14 | 电化学储能放电 | P_es_discharge 按站分区汇总                                              | [plot.py:90][243]  |
+| 15 | 抽蓄抽水       | − P_ps_pump 按站分区汇总                                                | [plot.py:91][244]  |
+| 16 | 电化学储能充电 | − P_es_charge 按站分区汇总                                              | [plot.py:92][245]  |
+| 17 | 友好电站充电   | − P_fr_charge 按站分区汇总                                              | [plot.py:93][246]  |
+| 18 | 省内净交换     | A_line @ P_line                                                          | [plot.py:94][247]  |
+| 19 | 省间互济       | 开关关闭，0 列                                                           | [plot.py:94][247]  |
+| 20 | 既定跨区输电   | 开关关闭，0 列                                                           | [plot.py:95][248]  |
+| 21 | 未供电负荷     | P_shed                                                                   | [plot.py:95][248]  |
+| 22 | 海上风电       | P_wind_off                                                               | [plot.py:96][312]  |
+| — | 响应后负荷     | P_load − P_shift_out + P_shift_in − P_cut（图线；CSV 与 PNG 各算一处） | [plot.py:203][249] |
+| — | 原始负荷       | P_load（虚线，仅 PNG 画）                                                | [plot.py:206][250] |
 
 ### 三、AnalysisExport.metrics（指标，analysis_export.py）
 
 | 指标                   | 含义                                  | 位置                          |
 | ---------------------- | ------------------------------------- | ----------------------------- |
-| P_D                    | 响应后负荷（分区×T，多数指标的输入） | [analysis_export.py:111][251] |
-| Rhot                   | 省级热备用                            | [analysis_export.py:111][251] |
-| balanceErrorMW         | 功率平衡残差最大值（应 ≈ 0）         | [analysis_export.py:112][252] |
-| renewableUtilization   | 新能源利用率（省级/分区）             | [analysis_export.py:113][253] |
-| curtailedEnergy        | 弃风弃光电量 MWh                      | [analysis_export.py:114][254] |
-| energyNotServed        | 失负荷电量 MWh                        | [analysis_export.py:115][255] |
-| lossOfLoadHours        | 缺电小时数 h                          | [analysis_export.py:116][256] |
-| maxLoadShortfall       | 最大负荷缺口 MW                       | [analysis_export.py:117][257] |
-| hotMargin / coldMargin | 热/冷备用最小裕度 MW                  | [analysis_export.py:118][258] |
-| CO2_t                  | CO₂ 排放总量 t                       | [analysis_export.py:119][259] |
-| storageClosure         | 储能首末能量闭合最大差 MWh（应 ≈ 0） | [analysis_export.py:119][259] |
+| P_D                    | 响应后负荷（分区×T，多数指标的输入） | [analysis_export.py:85][251]  |
+| Rhot                   | 省级热备用                            | [analysis_export.py:112][310] |
+| balanceErrorMW         | 功率平衡残差最大值（应 ≈ 0）         | [analysis_export.py:128][252] |
+| renewableUtilization   | 新能源利用率（省级/分区）             | [analysis_export.py:129][253] |
+| curtailedEnergy        | 弃风弃光电量 MWh                      | [analysis_export.py:130][254] |
+| energyNotServed        | 失负荷电量 MWh                        | [analysis_export.py:131][255] |
+| lossOfLoadHours        | 缺电小时数 h                          | [analysis_export.py:132][256] |
+| maxLoadShortfall       | 最大负荷缺口 MW                       | [analysis_export.py:133][257] |
+| hotMargin / coldMargin | 热/冷备用最小裕度 MW                  | [analysis_export.py:134][258] |
+| CO2_t                  | CO₂ 排放总量 t                       | [analysis_export.py:122][259] |
+| storageClosure         | 储能首末能量闭合最大差 MWh（应 ≈ 0） | [analysis_export.py:124][311] |
 
 ### 四、AnalysisExport.build_analysis（分析五表，analysis_export.py）
 
 | 表                               | 内容                                                       | 位置                          |
 | -------------------------------- | ---------------------------------------------------------- | ----------------------------- |
-| costSummary / costDetail         | 成本构成：按目标函数六大项 + 按成本性质十项（含核对差额）  | [analysis_export.py:159][260] |
-| thermalSummary                   | 煤电/气电逐台启停特征                                      | [analysis_export.py:185][261] |
-| storageSummary                   | 抽蓄/电化学/友好站逐台充放、SOC 与等效循环                 | [analysis_export.py:222][262] |
-| deviceSummary / renewableSummary | 11 类设备电量与最大出力；风光消纳（可用/已用/弃用/利用率） | [analysis_export.py:278][263] |
+| costSummary / costDetail         | 成本构成：按目标函数六大项 + 按成本性质十项（含核对差额）  | [analysis_export.py:184][260] |
+| thermalSummary                   | 煤电/气电逐台启停特征                                      | [analysis_export.py:241][261] |
+| storageSummary                   | 抽蓄/电化学/友好站逐台充放、SOC 与等效循环                 | [analysis_export.py:286][262] |
+| deviceSummary / renewableSummary | 11 类设备电量与最大出力；风光消纳（可用/已用/弃用/利用率） | [analysis_export.py:369][263] |
 
 ### 五、AnalysisExport.build_views（前端 views 的算法侧组装，analysis_export.py）
 
 | tab                               | 内容                         | 位置                          |
 | --------------------------------- | ---------------------------- | ----------------------------- |
-| deviceOperation / cost / thermal  | 设备运行、成本构成、火电启停 | [analysis_export.py:340][264] |
-| storagePs / storageEs / storageFr | 三类储能逐台充放与 SOC       | [analysis_export.py:419][265] |
-| deviceSummary / renewable         | 设备汇总、消纳特征           | [analysis_export.py:435][266] |
+| deviceOperation / cost / thermal  | 设备运行、成本构成、火电启停 | [analysis_export.py:451][264] |
+| storage_ps / storage_es / storage_fr | 三类储能逐台充放与 SOC    | [analysis_export.py:531][265] |
+| deviceSummary / renewable         | 设备汇总、消纳特征           | [analysis_export.py:547][266] |
 
 ### 六、存储本地结果
 
 | 文件                                        | 内容                                                                                                     | 产出                          |
 | ------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ----------------------------- |
-| 时序结果_T{T}.csv                           | 对拍件（compare.py 硬依赖，列集冻结）                                                                    | [solution.py:236][267]        |
-| 结果.json                                   | 算法对拍件：meta + four_items + costs + metrics 标量                                                     | [solution.py:299][268]        |
-| 设备运行数据_T{T}.csv / 设备运行_全系统.png | 见「二、Plot」                                                                                           | [plot.py:92][230]             |
-| 00_设备堆叠_N.png + 01~07 分析 PNG          | 00 为设备堆叠图复制（[analysis_export.py:912][272]）；01~07 为成本构成、火电启停、储能运行、消纳等分析图 | [analysis_export.py:699][269] |
-| 海南分析结果.mat                            | 19 个变量（MATLAB 对拍口径）                                                                             | [analysis_export.py:500][270] |
-| 分析摘要.txt                                | 十二节文本摘要（MATLAB 对拍口径）                                                                        | [analysis_export.py:613][271] |
+| 时序结果_T{T}.csv                           | 对拍件（compare.py 硬依赖，列集冻结）                                                                    | [solution.py:592][267]        |
+| 结果.json                                   | 算法对拍件：meta + four_items + costs + metrics 标量                                                     | [solution.py:636][268]        |
+| 设备运行数据_T{T}.csv / 设备运行_全系统.png | 见「二、Plot」                                                                                           | [plot.py:151][230]             |
+| 00_设备堆叠_N.png + 01~07 分析 PNG          | 00 为设备堆叠图复制（[analysis_export.py:1224][272]）；01~07 为成本构成、火电启停、储能运行、消纳等分析图 | [analysis_export.py:901][269] |
+| 海南分析结果.mat                            | 30 个变量（MATLAB 对拍口径）                                                                             | [analysis_export.py:1227][270] |
+| 分析摘要.txt                                | 十二节文本摘要（MATLAB 对拍口径）                                                                        | [analysis_export.py:1228][271] |
 
 # 接口
 
@@ -621,7 +622,7 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 
 <!-- 代码行号映射表 -->
 
-<!-- 分电源变量定义位置映射表（输入 → *Inputs 字段行；输出 → *Vars 字段行或 add_cost 行） -->
+<!-- 分电源变量定义位置映射表（输入 → *Inputs 字段行；输出 → *Vars 字段行或 add_cost 行；例外：仅以约束/表达式存在的量挂约束或计算行） -->
 
 <!-- 煤电 thermal.py -->
 
@@ -647,280 +648,284 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 
 <!-- 光热 csp.py（2026-10-16 接入，一比一对照 MATLAB 1.18/2.11/3.11/4.11） -->
 
-[1]: ./power_opt/model/units/thermal.py
-[2]: ./power_opt/model/units/gas.py
-[3]: ./power_opt/model/units/biomass.py
-[4]: ./power_opt/model/units/hydro.py
-[5]: ./power_opt/model/units/hydro.py
-[6]: ./power_opt/model/units/electrochemical.py
-[7]: ./power_opt/model/units/pumped_storage.py
-[8]: ./power_opt/model/context.py
-[9]: ./power_opt/model/context.py
-[10]: ./power_opt/model/units/friendly.py
-[11]: ./power_opt/model/units/nuclear.py
-[12]: ./power_opt/model/units/thermal.py
-[13]: ./power_opt/model/units/thermal.py
-[14]: ./power_opt/model/units/thermal.py
-[15]: ./power_opt/model/units/thermal.py
-[16]: ./power_opt/model/units/thermal.py
-[17]: ./power_opt/model/units/thermal.py
-[18]: ./power_opt/model/units/thermal.py
-[19]: ./power_opt/model/units/thermal.py
-[20]: ./power_opt/model/units/thermal.py
-[21]: ./power_opt/model/units/thermal.py
-[22]: ./power_opt/model/units/thermal.py
-[23]: ./power_opt/model/units/thermal.py
-[24]: ./power_opt/model/units/thermal.py
-[25]: ./power_opt/model/units/thermal.py
-[26]: ./power_opt/model/units/thermal.py
-[27]: ./power_opt/model/units/thermal.py
-[28]: ./power_opt/reader.py
-[29]: ./power_opt/model/units/thermal.py
-[30]: ./power_opt/reader.py
-[31]: ./power_opt/model/units/thermal.py
-[32]: ./power_opt/reader.py
-[33]: ./power_opt/model/units/thermal.py
-[34]: ./power_opt/reader.py
-[35]: ./power_opt/model/units/thermal.py
-[36]: ./power_opt/model/units/thermal.py
-[37]: ./power_opt/model/units/thermal.py
-[38]: ./power_opt/model/units/thermal.py
-[39]: ./power_opt/model/units/thermal.py
-[40]: ./power_opt/model/units/thermal.py
-[41]: ./power_opt/model/units/thermal.py
-[42]: ./power_opt/model/units/thermal.py
-[43]: ./power_opt/model/units/thermal.py
-[44]: ./power_opt/model/units/thermal.py
-[45]: ./power_opt/model/units/thermal.py
-[46]: ./power_opt/model/units/thermal.py
-[47]: ./power_opt/model/units/thermal.py
-[48]: ./power_opt/model/units/thermal.py
-[49]: ./power_opt/model/units/gas.py
-[50]: ./power_opt/model/units/gas.py
-[51]: ./power_opt/model/units/gas.py
-[52]: ./power_opt/model/units/gas.py
-[53]: ./power_opt/model/units/gas.py
-[54]: ./power_opt/model/units/gas.py
-[55]: ./power_opt/model/units/gas.py
-[56]: ./power_opt/model/units/gas.py
-[57]: ./power_opt/model/units/gas.py
-[58]: ./power_opt/model/units/gas.py
-[59]: ./power_opt/model/units/gas.py
-[60]: ./power_opt/model/units/gas.py
-[61]: ./power_opt/model/units/gas.py
-[62]: ./power_opt/model/units/gas.py
-[63]: ./power_opt/model/units/gas.py
-[64]: ./power_opt/model/units/gas.py
-[65]: ./power_opt/model/units/gas.py
-[66]: ./power_opt/model/units/gas.py
-[67]: ./power_opt/model/units/gas.py
-[68]: ./power_opt/model/units/gas.py
-[69]: ./power_opt/model/units/biomass.py
-[70]: ./power_opt/model/units/biomass.py
-[71]: ./power_opt/model/units/biomass.py
-[72]: ./power_opt/model/units/biomass.py
-[73]: ./power_opt/model/units/biomass.py
-[74]: ./power_opt/model/units/biomass.py
-[75]: ./power_opt/model/units/biomass.py
-[76]: ./power_opt/model/units/biomass.py
-[77]: ./power_opt/model/units/biomass.py
-[78]: ./power_opt/model/units/biomass.py
-[79]: ./power_opt/model/units/biomass.py
-[80]: ./power_opt/model/units/hydro.py
-[81]: ./power_opt/model/units/hydro.py
-[82]: ./power_opt/model/units/hydro.py
-[83]: ./power_opt/model/units/hydro.py
-[84]: ./power_opt/model/units/hydro.py
-[85]: ./power_opt/model/units/hydro.py
-[86]: ./power_opt/model/units/hydro.py
-[87]: ./power_opt/model/units/hydro.py
-[88]: ./power_opt/model/units/hydro.py
-[89]: ./power_opt/model/units/hydro.py
-[90]: ./power_opt/model/units/hydro.py
-[91]: ./power_opt/model/units/hydro.py
-[92]: ./power_opt/model/units/hydro.py
-[93]: ./power_opt/model/units/hydro.py
-[94]: ./power_opt/reader.py
-[95]: ./power_opt/model/units/hydro.py
-[96]: ./power_opt/model/units/hydro.py
-[97]: ./power_opt/model/units/hydro.py
-[98]: ./power_opt/model/units/hydro.py
-[99]: ./power_opt/model/units/hydro.py
-[100]: ./power_opt/model/units/electrochemical.py
-[101]: ./power_opt/model/units/electrochemical.py
-[102]: ./power_opt/model/units/electrochemical.py
-[103]: ./power_opt/model/units/electrochemical.py
-[104]: ./power_opt/model/units/electrochemical.py
-[105]: ./power_opt/model/units/electrochemical.py
-[106]: ./power_opt/model/units/electrochemical.py
-[107]: ./power_opt/model/units/electrochemical.py
-[108]: ./power_opt/model/units/electrochemical.py
-[109]: ./power_opt/model/units/electrochemical.py
-[110]: ./power_opt/model/units/electrochemical.py
-[111]: ./power_opt/model/units/electrochemical.py
-[112]: ./power_opt/model/units/electrochemical.py
-[113]: ./power_opt/model/units/electrochemical.py
-[114]: ./power_opt/model/units/electrochemical.py
-[115]: ./power_opt/model/units/electrochemical.py
-[116]: ./power_opt/model/units/electrochemical.py
-[117]: ./power_opt/model/units/electrochemical.py
-[118]: ./power_opt/model/units/electrochemical.py
-[119]: ./power_opt/model/units/electrochemical.py
-[120]: ./power_opt/model/units/electrochemical.py
-[121]: ./power_opt/model/units/electrochemical.py
-[122]: ./power_opt/model/units/pumped_storage.py
-[123]: ./power_opt/model/units/pumped_storage.py
-[124]: ./power_opt/model/units/pumped_storage.py
-[125]: ./power_opt/model/units/pumped_storage.py
-[126]: ./power_opt/model/units/pumped_storage.py
-[127]: ./power_opt/model/units/pumped_storage.py
-[128]: ./power_opt/model/units/pumped_storage.py
-[129]: ./power_opt/model/units/pumped_storage.py
-[130]: ./power_opt/model/units/pumped_storage.py
-[131]: ./power_opt/model/units/pumped_storage.py
-[132]: ./power_opt/model/units/pumped_storage.py
-[133]: ./power_opt/model/units/pumped_storage.py
-[134]: ./power_opt/model/units/pumped_storage.py
-[135]: ./power_opt/model/units/pumped_storage.py
-[136]: ./power_opt/model/units/pumped_storage.py
-[137]: ./power_opt/model/context.py
-[138]: ./power_opt/model/context.py
-[139]: ./power_opt/model/units/pumped_storage.py
-[140]: ./power_opt/model/units/pumped_storage.py
-[141]: ./power_opt/reader.py
-[142]: ./power_opt/reader.py
-[143]: ./power_opt/reader.py
-[144]: ./power_opt/model/context.py
-[145]: ./power_opt/solve.py
-[146]: ./power_opt/reader.py
-[147]: ./power_opt/reader.py
-[148]: ./power_opt/reader.py
-[149]: ./power_opt/model/context.py
-[150]: ./power_opt/solve.py
-[151]: ./power_opt/model/units/friendly.py
-[152]: ./power_opt/model/units/friendly.py
-[153]: ./power_opt/model/units/friendly.py
-[154]: ./power_opt/model/units/friendly.py
-[155]: ./power_opt/model/units/friendly.py
-[156]: ./power_opt/model/units/friendly.py
-[157]: ./power_opt/model/units/friendly.py
-[158]: ./power_opt/model/units/friendly.py
-[159]: ./power_opt/model/units/friendly.py
-[160]: ./power_opt/model/units/friendly.py
-[161]: ./power_opt/model/units/friendly.py
-[162]: ./power_opt/model/units/friendly.py
-[163]: ./power_opt/model/units/friendly.py
-[164]: ./power_opt/model/units/friendly.py
-[165]: ./power_opt/model/units/friendly.py
-[166]: ./power_opt/model/units/friendly.py
-[167]: ./power_opt/model/units/friendly.py
-[168]: ./power_opt/model/units/friendly.py
-[169]: ./power_opt/model/units/friendly.py
-[170]: ./power_opt/model/units/friendly.py
-[171]: ./power_opt/model/units/friendly.py
-[172]: ./power_opt/model/units/friendly.py
-[173]: ./power_opt/model/units/friendly.py
-[174]: ./power_opt/model/units/friendly.py
-[175]: ./power_opt/model/units/friendly.py
-[176]: ./power_opt/model/context.py
-[177]: ./power_opt/model/units/nuclear.py
-[178]: ./power_opt/model/units/nuclear.py
-[179]: ./power_opt/model/units/nuclear.py
-[180]: ./power_opt/model/units/nuclear.py
-[181]: ./power_opt/model/units/nuclear.py
-[182]: ./power_opt/model/units/nuclear.py
-[183]: ./power_opt/model/units/nuclear.py
-[184]: ./power_opt/model/units/nuclear.py
-[185]: ./power_opt/model/units/nuclear.py
-[186]: ./power_opt/model/units/nuclear.py
-[187]: ./power_opt/model/units/nuclear.py
-[188]: ./power_opt/model/units/nuclear.py
-[189]: ./power_opt/model/units/nuclear.py
-[190]: ./power_opt/model/units/nuclear.py
-[222]: ./power_opt/solution.py
-[223]: ./power_opt/solution.py
-[224]: ./power_opt/solution.py
-[225]: ./power_opt/solution.py
-[226]: ./power_opt/solution.py
-[227]: ./power_opt/solution.py
-[228]: ./power_opt/solution.py
-[229]: ./power_opt/solution.py
-[230]: ./power_opt/plot.py
-[231]: ./power_opt/plot.py
-[232]: ./power_opt/plot.py
-[233]: ./power_opt/plot.py
-[234]: ./power_opt/plot.py
-[235]: ./power_opt/plot.py
-[236]: ./power_opt/plot.py
-[237]: ./power_opt/plot.py
-[238]: ./power_opt/plot.py
-[239]: ./power_opt/plot.py
-[240]: ./power_opt/plot.py
-[241]: ./power_opt/plot.py
-[242]: ./power_opt/plot.py
-[243]: ./power_opt/plot.py
-[244]: ./power_opt/plot.py
-[245]: ./power_opt/plot.py
-[246]: ./power_opt/plot.py
-[247]: ./power_opt/plot.py
-[248]: ./power_opt/plot.py
-[249]: ./power_opt/plot.py
-[250]: ./power_opt/plot.py
-[251]: ./power_opt/analysis_export.py
-[252]: ./power_opt/analysis_export.py
-[253]: ./power_opt/analysis_export.py
-[254]: ./power_opt/analysis_export.py
-[255]: ./power_opt/analysis_export.py
-[256]: ./power_opt/analysis_export.py
-[257]: ./power_opt/analysis_export.py
-[258]: ./power_opt/analysis_export.py
-[259]: ./power_opt/analysis_export.py
-[260]: ./power_opt/analysis_export.py
-[261]: ./power_opt/analysis_export.py
-[262]: ./power_opt/analysis_export.py
-[263]: ./power_opt/analysis_export.py
-[264]: ./power_opt/analysis_export.py
-[265]: ./power_opt/analysis_export.py
-[266]: ./power_opt/analysis_export.py
-[267]: ./power_opt/solution.py
-[268]: ./power_opt/solution.py
-[269]: ./power_opt/analysis_export.py
-[270]: ./power_opt/analysis_export.py
-[271]: ./power_opt/analysis_export.py
-[272]: ./power_opt/analysis_export.py
-[273]: ./power_opt/model/units/csp.py
-[274]: ./power_opt/model/units/csp.py
-[275]: ./power_opt/model/units/csp.py
-[276]: ./power_opt/model/units/csp.py
-[277]: ./power_opt/model/units/csp.py
-[278]: ./power_opt/model/units/csp.py
-[279]: ./power_opt/model/units/csp.py
-[280]: ./power_opt/model/units/csp.py
-[281]: ./power_opt/model/units/csp.py
-[282]: ./power_opt/model/units/csp.py
-[283]: ./power_opt/model/units/csp.py
-[284]: ./power_opt/model/units/csp.py
-[285]: ./power_opt/model/units/csp.py
-[286]: ./power_opt/model/units/csp.py
-[287]: ./power_opt/model/units/csp.py
-[288]: ./power_opt/model/units/csp.py
-[289]: ./power_opt/model/units/csp.py
-[290]: ./power_opt/model/units/csp.py
-[291]: ./power_opt/model/units/csp.py
-[292]: ./power_opt/model/units/csp.py
-[293]: ./power_opt/model/units/csp.py
-[294]: ./power_opt/model/units/csp.py
-[295]: ./power_opt/model/units/csp.py
-[296]: ./power_opt/model/units/csp.py
-[297]: ./power_opt/model/units/csp.py
-[298]: ./power_opt/model/units/csp.py
-[299]: ./power_opt/model/units/csp.py
-[300]: ./power_opt/model/units/csp.py
-[301]: ./power_opt/model/units/csp.py
-[302]: ./power_opt/model/units/csp.py
-[303]: ./power_opt/model/units/csp.py
-[304]: ./power_opt/model/units/csp.py
-[305]: ./power_opt/model/units/csp.py
-[306]: ./power_opt/model/units/csp.py
-[307]: ./power_opt/model/units/csp.py
-[308]: ./power_opt/model/units/csp.py
+[1]: ./power_opt/model/units/thermal.py#L107
+[2]: ./power_opt/model/units/gas.py#L65
+[3]: ./power_opt/model/units/biomass.py#L55
+[4]: ./power_opt/model/units/hydro.py#L55
+[5]: ./power_opt/model/units/hydro.py#L55
+[6]: ./power_opt/model/units/electrochemical.py#L57
+[7]: ./power_opt/model/units/pumped_storage.py#L57
+[8]: ./power_opt/model/context.py#L70
+[9]: ./power_opt/model/context.py#L76
+[10]: ./power_opt/model/units/friendly.py#L60
+[11]: ./power_opt/model/units/nuclear.py#L52
+[12]: ./power_opt/model/units/thermal.py#L32
+[13]: ./power_opt/model/units/thermal.py#L32
+[14]: ./power_opt/model/units/thermal.py#L40
+[15]: ./power_opt/model/units/thermal.py#L40
+[16]: ./power_opt/model/units/thermal.py#L40
+[17]: ./power_opt/model/units/thermal.py#L40
+[18]: ./power_opt/model/units/thermal.py#L38
+[19]: ./power_opt/model/units/thermal.py#L38
+[20]: ./power_opt/model/units/thermal.py#L325
+[21]: ./power_opt/model/units/thermal.py#L33
+[22]: ./power_opt/model/units/thermal.py#L37
+[23]: ./power_opt/model/units/thermal.py#L37
+[24]: ./power_opt/model/units/thermal.py#L37
+[25]: ./power_opt/model/units/thermal.py#L34
+[26]: ./power_opt/model/units/thermal.py#L36
+[27]: ./power_opt/model/units/thermal.py#L36
+[28]: ./power_opt/reader.py#L115
+[29]: ./power_opt/model/units/thermal.py#L42
+[30]: ./power_opt/reader.py#L115
+[31]: ./power_opt/model/units/thermal.py#L41
+[32]: ./power_opt/reader.py#L115
+[33]: ./power_opt/model/units/thermal.py#L41
+[34]: ./power_opt/reader.py#L115
+[35]: ./power_opt/model/units/thermal.py#L41
+[36]: ./power_opt/model/units/thermal.py#L57
+[37]: ./power_opt/model/units/thermal.py#L58
+[38]: ./power_opt/model/units/thermal.py#L59
+[39]: ./power_opt/model/units/thermal.py#L60
+[40]: ./power_opt/model/units/thermal.py#L63
+[41]: ./power_opt/model/units/thermal.py#L425
+[42]: ./power_opt/model/units/thermal.py#L426
+[43]: ./power_opt/model/units/thermal.py#L425
+[44]: ./power_opt/model/units/thermal.py#L426
+[45]: ./power_opt/model/units/thermal.py#L427
+[46]: ./power_opt/model/units/thermal.py#L427
+[47]: ./power_opt/model/units/thermal.py#L427
+[48]: ./power_opt/model/units/thermal.py#L425
+[49]: ./power_opt/model/units/gas.py#L35
+[50]: ./power_opt/model/units/gas.py#L35
+[51]: ./power_opt/model/units/gas.py#L42
+[52]: ./power_opt/model/units/gas.py#L42
+[53]: ./power_opt/model/units/gas.py#L42
+[54]: ./power_opt/model/units/gas.py#L42
+[55]: ./power_opt/model/units/gas.py#L242
+[56]: ./power_opt/model/units/gas.py#L40
+[57]: ./power_opt/model/units/gas.py#L37
+[58]: ./power_opt/model/units/gas.py#L39
+[59]: ./power_opt/model/units/gas.py#L39
+[60]: ./power_opt/model/units/gas.py#L55
+[61]: ./power_opt/model/units/gas.py#L56
+[62]: ./power_opt/model/units/gas.py#L57
+[63]: ./power_opt/model/units/gas.py#L58
+[64]: ./power_opt/model/units/gas.py#L61
+[65]: ./power_opt/model/units/gas.py#L320
+[66]: ./power_opt/model/units/gas.py#L321
+[67]: ./power_opt/model/units/gas.py#L320
+[68]: ./power_opt/model/units/gas.py#L320
+[69]: ./power_opt/model/units/biomass.py#L34
+[70]: ./power_opt/model/units/biomass.py#L34
+[71]: ./power_opt/model/units/biomass.py#L39
+[72]: ./power_opt/model/units/biomass.py#L39
+[73]: ./power_opt/model/units/biomass.py#L41
+[74]: ./power_opt/model/units/biomass.py#L37
+[75]: ./power_opt/model/units/biomass.py#L36
+[76]: ./power_opt/model/units/biomass.py#L52
+[77]: ./power_opt/model/units/biomass.py#L221
+[78]: ./power_opt/model/units/biomass.py#L222
+[79]: ./power_opt/model/units/biomass.py#L223
+[80]: ./power_opt/model/units/hydro.py#L34
+[81]: ./power_opt/model/units/hydro.py#L34
+[82]: ./power_opt/model/units/hydro.py#L39
+[83]: ./power_opt/model/units/hydro.py#L40
+[84]: ./power_opt/model/units/hydro.py#L50
+[85]: ./power_opt/model/units/hydro.py#L230
+[86]: ./power_opt/model/units/hydro.py#L35
+[87]: ./power_opt/model/units/hydro.py#L35
+[88]: ./power_opt/model/units/hydro.py#L131
+[89]: ./power_opt/model/units/hydro.py#L37
+[90]: ./power_opt/model/units/hydro.py#L39
+[91]: ./power_opt/model/units/hydro.py#L202
+[92]: ./power_opt/model/units/hydro.py#L203
+[93]: ./power_opt/model/units/hydro.py#L40
+[94]: ./power_opt/reader.py#L114
+[95]: ./power_opt/model/units/hydro.py#L50
+[96]: ./power_opt/model/units/hydro.py#L51
+[97]: ./power_opt/model/units/hydro.py#L52
+[98]: ./power_opt/model/units/hydro.py#L231
+[99]: ./power_opt/model/units/hydro.py#L232
+[100]: ./power_opt/model/units/electrochemical.py#L33
+[101]: ./power_opt/model/units/electrochemical.py#L32
+[102]: ./power_opt/model/units/electrochemical.py#L105
+[103]: ./power_opt/model/units/electrochemical.py#L106
+[104]: ./power_opt/model/units/electrochemical.py#L35
+[105]: ./power_opt/model/units/electrochemical.py#L35
+[106]: ./power_opt/model/units/electrochemical.py#L36
+[107]: ./power_opt/model/units/electrochemical.py#L107
+[108]: ./power_opt/model/units/electrochemical.py#L112
+[109]: ./power_opt/model/units/electrochemical.py#L112
+[110]: ./power_opt/model/units/electrochemical.py#L113
+[111]: ./power_opt/model/units/electrochemical.py#L113
+[112]: ./power_opt/model/units/electrochemical.py#L114
+[113]: ./power_opt/model/units/electrochemical.py#L115
+[114]: ./power_opt/model/units/electrochemical.py#L50
+[115]: ./power_opt/model/units/electrochemical.py#L50
+[116]: ./power_opt/model/units/electrochemical.py#L53
+[117]: ./power_opt/model/units/electrochemical.py#L51
+[118]: ./power_opt/model/units/electrochemical.py#L52
+[119]: ./power_opt/model/units/electrochemical.py#L228
+[120]: ./power_opt/model/units/electrochemical.py#L228
+[121]: ./power_opt/model/units/electrochemical.py#L228
+[122]: ./power_opt/model/units/pumped_storage.py#L174
+[123]: ./power_opt/model/units/pumped_storage.py#L32
+[124]: ./power_opt/model/units/pumped_storage.py#L35
+[125]: ./power_opt/model/units/pumped_storage.py#L36
+[126]: ./power_opt/model/units/pumped_storage.py#L40
+[127]: ./power_opt/model/units/pumped_storage.py#L40
+[128]: ./power_opt/model/units/pumped_storage.py#L38
+[129]: ./power_opt/model/units/pumped_storage.py#L37
+[130]: ./power_opt/model/units/pumped_storage.py#L106
+[131]: ./power_opt/model/units/pumped_storage.py#L32
+[132]: ./power_opt/model/units/pumped_storage.py#L107
+[133]: ./power_opt/model/units/pumped_storage.py#L51
+[134]: ./power_opt/model/units/pumped_storage.py#L51
+[135]: ./power_opt/model/units/pumped_storage.py#L52
+[136]: ./power_opt/model/units/pumped_storage.py#L52
+[137]: ./power_opt/model/context.py#L91
+[138]: ./power_opt/model/context.py#L92
+[139]: ./power_opt/model/units/pumped_storage.py#L54
+[140]: ./power_opt/model/units/pumped_storage.py#L232
+[141]: ./power_opt/reader.py#L143
+[142]: ./power_opt/reader.py#L133
+[143]: ./power_opt/reader.py#L133
+[144]: ./power_opt/model/context.py#L74
+[145]: ./power_opt/solve.py#L124
+[146]: ./power_opt/reader.py#L144
+[147]: ./power_opt/reader.py#L134
+[148]: ./power_opt/reader.py#L134
+[149]: ./power_opt/model/context.py#L76
+[150]: ./power_opt/solve.py#L125
+[151]: ./power_opt/model/units/friendly.py#L38
+[152]: ./power_opt/model/units/friendly.py#L39
+[153]: ./power_opt/model/units/friendly.py#L40
+[154]: ./power_opt/model/units/friendly.py#L40
+[155]: ./power_opt/model/units/friendly.py#L41
+[156]: ./power_opt/model/units/friendly.py#L41
+[157]: ./power_opt/model/units/friendly.py#L32
+[158]: ./power_opt/model/units/friendly.py#L32
+[159]: ./power_opt/model/units/friendly.py#L33
+[160]: ./power_opt/model/units/friendly.py#L33
+[161]: ./power_opt/model/units/friendly.py#L35
+[162]: ./power_opt/model/units/friendly.py#L35
+[163]: ./power_opt/model/units/friendly.py#L36
+[164]: ./power_opt/model/units/friendly.py#L34
+[165]: ./power_opt/model/units/friendly.py#L53
+[166]: ./power_opt/model/units/friendly.py#L53
+[167]: ./power_opt/model/units/friendly.py#L53
+[168]: ./power_opt/model/units/friendly.py#L54
+[169]: ./power_opt/model/units/friendly.py#L54
+[170]: ./power_opt/model/units/friendly.py#L54
+[171]: ./power_opt/model/units/friendly.py#L55
+[172]: ./power_opt/model/units/friendly.py#L55
+[173]: ./power_opt/model/units/friendly.py#L56
+[174]: ./power_opt/model/units/friendly.py#L56
+[175]: ./power_opt/model/units/friendly.py#L57
+[176]: ./power_opt/model/context.py#L240
+[177]: ./power_opt/model/units/nuclear.py#L33
+[178]: ./power_opt/model/units/nuclear.py#L33
+[179]: ./power_opt/model/units/nuclear.py#L38
+[180]: ./power_opt/model/units/nuclear.py#L38
+[181]: ./power_opt/model/units/nuclear.py#L34
+[182]: ./power_opt/model/units/nuclear.py#L36
+[183]: ./power_opt/model/units/nuclear.py#L35
+[184]: ./power_opt/model/units/nuclear.py#L33
+[185]: ./power_opt/model/units/nuclear.py#L169
+[186]: ./power_opt/model/units/nuclear.py#L49
+[187]: ./power_opt/model/units/nuclear.py#L158
+[188]: ./power_opt/model/units/nuclear.py#L195
+[189]: ./power_opt/model/units/nuclear.py#L196
+[190]: ./power_opt/model/units/nuclear.py#L197
+[222]: ./power_opt/solution.py#L146
+[223]: ./power_opt/solution.py#L272
+[224]: ./power_opt/solution.py#L130
+[225]: ./power_opt/solution.py#L276
+[226]: ./power_opt/model/units/nuclear.py#L158
+[227]: ./power_opt/solution.py#L300
+[228]: ./power_opt/solution.py#L345
+[229]: ./power_opt/analysis_export.py#L283
+[230]: ./power_opt/plot.py#L151
+[231]: ./power_opt/plot.py#L231
+[232]: ./power_opt/plot.py#L75
+[233]: ./power_opt/plot.py#L76
+[234]: ./power_opt/plot.py#L77
+[235]: ./power_opt/plot.py#L78
+[236]: ./power_opt/plot.py#L79
+[237]: ./power_opt/plot.py#L80
+[238]: ./power_opt/plot.py#L81
+[239]: ./power_opt/plot.py#L84
+[240]: ./power_opt/plot.py#L86
+[241]: ./power_opt/plot.py#L88
+[242]: ./power_opt/plot.py#L89
+[243]: ./power_opt/plot.py#L90
+[244]: ./power_opt/plot.py#L91
+[245]: ./power_opt/plot.py#L92
+[246]: ./power_opt/plot.py#L93
+[247]: ./power_opt/plot.py#L94
+[248]: ./power_opt/plot.py#L95
+[249]: ./power_opt/plot.py#L203
+[250]: ./power_opt/plot.py#L206
+[251]: ./power_opt/analysis_export.py#L85
+[252]: ./power_opt/analysis_export.py#L128
+[253]: ./power_opt/analysis_export.py#L129
+[254]: ./power_opt/analysis_export.py#L130
+[255]: ./power_opt/analysis_export.py#L131
+[256]: ./power_opt/analysis_export.py#L132
+[257]: ./power_opt/analysis_export.py#L133
+[258]: ./power_opt/analysis_export.py#L134
+[259]: ./power_opt/analysis_export.py#L122
+[260]: ./power_opt/analysis_export.py#L184
+[261]: ./power_opt/analysis_export.py#L241
+[262]: ./power_opt/analysis_export.py#L286
+[263]: ./power_opt/analysis_export.py#L369
+[264]: ./power_opt/analysis_export.py#L451
+[265]: ./power_opt/analysis_export.py#L531
+[266]: ./power_opt/analysis_export.py#L547
+[267]: ./power_opt/solution.py#L592
+[268]: ./power_opt/solution.py#L636
+[269]: ./power_opt/analysis_export.py#L901
+[270]: ./power_opt/analysis_export.py#L1227
+[271]: ./power_opt/analysis_export.py#L1228
+[272]: ./power_opt/analysis_export.py#L1224
+[273]: ./power_opt/model/units/csp.py#L34
+[274]: ./power_opt/model/units/csp.py#L35
+[275]: ./power_opt/model/units/csp.py#L44
+[276]: ./power_opt/model/units/csp.py#L45
+[277]: ./power_opt/model/units/csp.py#L133
+[278]: ./power_opt/model/units/csp.py#L134
+[279]: ./power_opt/model/units/csp.py#L130
+[280]: ./power_opt/model/units/csp.py#L37
+[281]: ./power_opt/model/units/csp.py#L37
+[282]: ./power_opt/model/units/csp.py#L38
+[283]: ./power_opt/model/units/csp.py#L39
+[284]: ./power_opt/model/units/csp.py#L39
+[285]: ./power_opt/model/units/csp.py#L40
+[286]: ./power_opt/model/units/csp.py#L40
+[287]: ./power_opt/model/units/csp.py#L41
+[288]: ./power_opt/model/units/csp.py#L42
+[289]: ./power_opt/model/units/csp.py#L42
+[290]: ./power_opt/model/units/csp.py#L43
+[291]: ./power_opt/model/units/csp.py#L43
+[292]: ./power_opt/model/units/csp.py#L46
+[293]: ./power_opt/model/units/csp.py#L47
+[294]: ./power_opt/model/units/csp.py#L58
+[295]: ./power_opt/model/units/csp.py#L59
+[296]: ./power_opt/model/units/csp.py#L59
+[297]: ./power_opt/model/units/csp.py#L59
+[298]: ./power_opt/model/units/csp.py#L60
+[299]: ./power_opt/model/units/csp.py#L61
+[300]: ./power_opt/model/units/csp.py#L62
+[301]: ./power_opt/model/units/csp.py#L63
+[302]: ./power_opt/model/units/csp.py#L64
+[303]: ./power_opt/model/units/csp.py#L65
+[304]: ./power_opt/model/units/csp.py#L66
+[305]: ./power_opt/model/units/csp.py#L268
+[306]: ./power_opt/model/units/csp.py#L269
+[307]: ./power_opt/model/units/csp.py#L270
+[308]: ./power_opt/model/units/csp.py#L69
+[309]: ./power_opt/plot.py#L82
+[310]: ./power_opt/analysis_export.py#L112
+[311]: ./power_opt/analysis_export.py#L124
+[312]: ./power_opt/plot.py#L96
