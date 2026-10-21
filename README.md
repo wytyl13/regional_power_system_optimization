@@ -301,7 +301,7 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 
 > http://192.168.2.40:9999/
 >
-> 所有端点（含错误）统一返回 `{"success", "message", "data", "timestamp"}` 壳（service/shared/errors.py `make_response`，2026-10-20 起；同日补齐 400 参数错 / 422 请求体校验 / 500 兜底三条路径，无 FastAPI 默认体漏网）；下述各端点示例仅展示 `data` 内容，失败时 `success=false`、原因在 `message`。
+> 所有端点（含错误）统一返回 `{"success", "message", "data", "timestamp"}` 壳（service/shared/errors.py `make_response`，2026-10-20 起；同日补齐 400 参数错 / 422 请求体校验 / 500 兜底三条路径，无 FastAPI 默认体漏网）；成功 `success=true`、载荷在 `data`，失败 `success=false`、`data=null`、原因在 `message`。下述各端点示例均为完整返回体。
 
 ## POST /api/datasets
 
@@ -312,41 +312,73 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 
 ```json
 {
-  "datasetId": "ds_9bfeec0820e3", // 必返；后续接口的任务钥匙
-  "area": "海南", // 必返；模版区域
-  "year": 2030, // 必返；模版目标年
-  "categories": [
-    {
-      "name": "",
-      "items": [
-        {
-          "name": "",
-          "tables": [
-            {
-              "name": "",
-              "columns": [],
-              "rows": [
-                {}
-              ]
-            }
-            // ... 
-          ],
-          "curve": {
-            "sheet": "负荷-8760",
-            "filterBy": [
-              "区域"
+  "success": true,   // 必返；true 成功 / false 失败
+  "message": "ok",   // 必返；成功固定 "ok"，失败为可直接展示的原因
+  "data": {          // 必返；成功为结果载荷，失败为 null
+    "datasetId": "ds_9bfeec0820e3", // 必返；后续接口的任务钥匙
+    "area": "海南", // 必返；模版区域（字符串）
+    "year": 2030, // 必返；模版目标年（整数）
+    "categories": [ // 需要在前端展示的用户上传的模板数据，有表格的需要渲染表格
+      { // 2026-10-21 定稿：键名与 config 同轨（group_name/sub_group_name/data），单轨中文名（纯只读展示，无 label）
+        "group_name": "负荷及备用", // 大类名
+        "data": [ // 细分列表（送电协议类无 data，本级直接挂 tables/curve）
+          {
+            "sub_group_name": "负荷", // 细分名
+            "tables": [ // 该细分的表格
+              {
+                "sheet_name": "负荷", // 表名（= 模版 sheet 名）
+                "columns": [], // 列名数组
+                "rows": [ // 行数组，每行 {列名: 单元格值}
+                  {}
+                ]
+              }
+              // ...
             ],
-            "match": "exact"
+            "curve": { // 可选；该细分有曲线元数据才有，前端据 filterBy 拼懒加载 URL
+              "sheet_name": "负荷-8760",
+              "filterBy": [
+                "区域"
+              ],
+              "match": "exact"
+            }
           }
-        }
-      ]
-    }
-    // ...
-  ], // 需要在前端展示的用户上传的模板数据，有表格的需要渲染表格
-  "config": {}, // 需要在前端展示的基础配置，支持用户修改
-  "fixedParams": [], // 需要在前端展示的基础配置，不支持用户修改
-  "warnings": [], // 模版解析警告
-  "excludedUnits": [] // 未纳入机组清单（含原因）
+        ]
+      }
+      // ...
+    ],
+    "config": [ // 用户可改配置表单（2026-10-21 定稿三层数组树）；渲染判别：条目有 data 键=分组、有 value 键=字段；控件按 value 类型：布尔=开关、有 options=下拉、数字=数字框、字符串=文本框
+      {
+        "group_name": "scenario", // 组名
+        "label": "情景", // 组中文标题
+        "data": [ // 字段列表
+          {"field_name": "startTime", "label": "求解起始时间", "value": "2030-01-01 00:00"},
+          {"field_name": "hours", "label": "求解时长（小时）", "value": 168},
+          {"field_name": "hydrology", "label": "水文情景（平水年/枯水年）", "value": "平水年",
+           "options": ["平水年", "枯水年"]}, // options 仅 hydrology 有
+          {"field_name": "interprovincial", "label": "省间互济开关", "value": false},
+          {"field_name": "interRegionTransfer", "label": "跨区送电开关", "value": false}
+        ]
+      }
+      // ... 共 7 组：scenario/solver/province/penalties/demandResponse/units/emission（98 字段）
+      ,{
+        "group_name": "units", // units 组的 data 内为子组（共 10 个：coal/gas/nuclear/biomass/hydro/wind/pv/pumpedStorage/storage/friendlyStation）
+        "label": "机组信息",
+        "data": [
+          {
+            "sub_group_name": "wind", // 子组名
+            "label": "风电",
+            "data": [
+              {"field_name": "fom", "label": "风电固定运维成本（元/MW·年）", "value": 100000}
+            ]
+          }
+        ]
+      }
+    ],
+    "warnings": [ // 模版解析警告；元素 {code, message}
+      {"code": "NUCLEAR_NO_MIN_RATIO", "message": "收资未含核电最小出力率列，核电按基荷处理（最小出力=额定容量）"}
+    ]
+  },
+  "timestamp": "2026-10-21T10:00:00" // 必返；响应生成时刻（ISO 格式，精确到秒）
 }
 ```
 
@@ -354,15 +386,28 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 
 ```json
 {
-	"config": {}, // 必返；默认配置表单（无模版，收资浮出值为内置兜底）
-	"fixedParams": [] // 必返；服务端固定口径说明（只读展示）
+	"success": true,  // 必返；同上，四键壳所有端点一致
+	"message": "ok",  // 必返
+	"data": {
+		"config": [ // 必返；默认配置表单（无模版，收资浮出值为内置兜底），结构同上传分支（三层数组树，2026-10-21 定稿）
+			{
+				"group_name": "solver",
+				"label": "求解器",
+				"data": [
+					{"field_name": "timeLimit_s", "label": "求解时限（秒）", "value": 1800},
+					{"field_name": "mipGap", "label": "MIP最优间隙（相对值）", "value": 0.001}
+				]
+			}
+		]
+	},
+	"timestamp": "2026-10-21T10:00:00" // 必返
 }
 ```
 
 ## GET /api/datasets/curves/
 
 > 曲线懒加载（按 filterBy 键值筛，需要在前端支持表格查看和导出）；返回结构与
-> 查看任务返回的 view 相同（2026-10-20 起），仅无 series/lines 区分：单表一块
+> 任务结果 views 各序列条目同款（2026-10-21 起），仅无 series_data/lines_data 分块：单表一块
 
 **示例：** `http://192.168.2.40:9999/api/datasets/<id>/curves/负荷-8760?区域=海南`
 
@@ -370,14 +415,19 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 
 ```json
 {
-	"sheet_name": "负荷-8760",    // 必返；曲线 sheet 名
-	"index": ["01-01", "01-02"],  // 必返；首保留列（日期等行标列）各行的值，字符串
-	"data": [                      // 必返；其余保留列各一列（筛选键列、剔除列不在内）
-		{
-			"column_name": "0时",          // 必返；列名
-			"data": [0.577, 0.598]         // 必返；该列各行原值，数字不转字符串（空单元格为 null）
-		}
-	]
+	"success": true,
+	"message": "ok",
+	"data": {
+		"sheet_name": "负荷-8760",    // 必返；曲线 sheet 名
+		"index": ["01-01", "01-02"],  // 必返；首保留列（日期等行标列）各行的值，字符串
+		"data": [                      // 必返；其余保留列各一列（筛选键列、剔除列不在内）
+			{
+				"column_name": "0时",          // 必返；列名
+				"data": [0.577, 0.598]         // 必返；该列各行原值，数字不转字符串（空单元格为 null）
+			}
+		]
+	},
+	"timestamp": "2026-10-21T10:00:00"
 }
 ```
 
@@ -392,9 +442,12 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 	"datasetId": "", # /api/datasets的返回值datasetId
 	"config": {
 		"solver": {
-			"mipGap": 0.9
+			"mipGap": 0.001
+		},
+		"units": {
+			"wind": {"fom": 120000}
 		}
-	}, # 用户修改后的基础配置，按照原格式简化后的字典传递
+	} # 用户修改后的配置（2026-10-21 定稿）：裸嵌套 {组:{键:值}}（units 组多一层子组），改哪个传哪个、没传的键用默认值/收资值；不回传渲染树与 label/options；全量或精简（改动集）均可
 }
 ```
 
@@ -402,7 +455,12 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 
 ```json
 {
-	"jobId": "job_20261013_145202_c677c8"
+	"success": true,
+	"message": "ok",
+	"data": {
+		"jobId": "job_20261013_145202_c677c8" // 必返；任务号，查询/取结果的钥匙
+	},
+	"timestamp": "2026-10-21T10:00:00"
 }
 ```
 
@@ -414,47 +472,52 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 
 ```json
  {
-	"jobs": [
-		{
-			"jobId": "job_20261013_145202_c677c8",
-			"datasetId": "ds_e087562f6438",
-			"status": "running",
-			"submittedAt": "2026-10-13 14:52:02"
-		},
-		{
-			"jobId": "job_20261013_122817_9a2f4f",
-			"datasetId": "ds_a7b6117e21d0",
-			"status": "solved",
-			"submittedAt": "2026-10-13 12:28:17",
-			"finishedAt": "2026-10-13 12:28:29",
-			"area": "海南",
-			"year": 2030,
-			"scenario": {
-				"hours": 24,
-				"startTime": "2030-01-01 00:00",
-				"hydrology": "平水年",
-				"interprovincial": false,
-				"interRegionTransfer": false
+	"success": true,
+	"message": "ok",
+	"data": {
+		"jobs": [ // 必返；任务摘要数组（新→旧，最多 5 条）。queued/running 项只有前四键；solved 项补 finishedAt/area/year/scenario/fourItems；failed 项补 error（字符串）；interrupted 项只有 jobId/status/submittedAt
+			{
+				"jobId": "job_20261013_145202_c677c8",
+				"datasetId": "ds_e087562f6438",
+				"status": "running", // queued/running/solved/failed/interrupted
+				"submittedAt": "2026-10-13 14:52:02"
 			},
-			"fourItems": {
-				"variables": {
-					"count": 8007,
-					"binary": 2712
+			{
+				"jobId": "job_20261013_122817_9a2f4f",
+				"datasetId": "ds_a7b6117e21d0",
+				"status": "solved",
+				"submittedAt": "2026-10-13 12:28:17",
+				"finishedAt": "2026-10-13 12:28:29",
+				"area": "海南",
+				"year": 2030,
+				"scenario": {
+					"hours": 24,
+					"startTime": "2030-01-01 00:00",
+					"hydrology": "平水年",
+					"interprovincial": false,
+					"interRegionTransfer": false
 				},
-				"constraints": {
-					"rows": 13384,
-					"nonzeros": 37831
-				},
-				"status": "OPTIMAL",
-				"objective": {
-					"value": 43109003.31607772,
-					"mipGapPct": 0.09770398377554372,
-					"runtime_s": 2.1649999618530273
+				"fourItems": {
+					"variables": {
+						"count": 8007,
+						"binary": 2712
+					},
+					"constraints": {
+						"rows": 13384,
+						"nonzeros": 37831
+					},
+					"status": "OPTIMAL",
+					"objective": {
+						"value": 43109003.31607772,
+						"mipGapPct": 0.09770398377554372,
+						"runtime_s": 2.1649999618530273
+					}
 				}
-			}
-		},
-		...
-	]
+			},
+			...
+		]
+	},
+	"timestamp": "2026-10-21T10:00:00"
 }
 ```
 
@@ -462,17 +525,20 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 
 > 查看指定任务
 
-> **return**
+> **return**（running 示例；solved 项另含 `fourItems`（结构同任务列表）与 `report`（报告文本块），failed 项另含 `error`（字符串）、`userConfig`（本次请求配置）与 `startedAt`）
 
 ```json
 {
-
-    "jobId": "job_20261013_145202_c677c8",
-    "datasetId": "ds_e087562f6438",
-    "status": "running",
-    "submittedAt": "2026-10-13 14:52:02",
-    "startedAt": "2026-10-13 14:52:02"
-
+	"success": true,
+	"message": "ok",
+	"data": {
+		"jobId": "job_20261013_145202_c677c8",
+		"datasetId": "ds_e087562f6438",
+		"status": "running",
+		"submittedAt": "2026-10-13 14:52:02",
+		"startedAt": "2026-10-13 14:52:02"
+	},
+	"timestamp": "2026-10-21T10:00:00"
 }
 ```
 
@@ -495,40 +561,39 @@ plot.py / analysis_export.py   出图层与分析层：CSV / PNG / mat / txt / j
 
 **示例2：** http://127.0.0.1:8000/api/jobs/job_20261020_183357_d68693/results
 
-> **return**（data）
+> **return**
 
 ```json
 {
-	"jobId": "job_20261020_183357_d68693",
-	"datasetId": "ds_04dbea9a92f5",
-	"area": "海南",
-	"year": 2030,
-	"submittedAt": "2026-10-20 18:33:57",
-	"finishedAt": "2026-10-20 18:34:12",
-	"result": {
-		"report": {}, // 报告文本块（供状态页展示）
-		"config": {}, // 用户可改配置回显
-		"views": [ // 前端渲染入口：list，每组一张图的取数（series 功率序列 + lines 负荷参考线）
-			{
-				"series": {
+	"success": true,
+	"message": "ok",
+	"data": {
+		"jobId": "job_20261020_183357_d68693",
+		"datasetId": "ds_04dbea9a92f5",
+		"area": "海南",
+		"year": 2030,
+		"submittedAt": "2026-10-20 18:33:57",
+		"finishedAt": "2026-10-20 18:34:12",
+		"result": {
+			"report": {}, // 报告文本块（供状态页展示）
+			"config": [], // 生效配置回显，结构同 /api/datasets 下发的 config 表单（三层数组树，值为本次生效配置）
+			"views": [ // 前端渲染入口：list，每组一张图（2026-10-21 定稿：sheet_name/index 提到组级共享）
+				{
 					"sheet_name": "逐小时结果", // 取数来源 sheet
-					"index": ["2030-01-01 00:00", "2030-01-01 01:00"], // T 个时间戳，与 data 等长
-					"data": [ // 需要绘制的功率序列（可多列）
+					"index": ["2030-01-01 00:00", "2030-01-01 01:00"], // T 个时间戳，与各序列等长
+					"series_data": [ // 需要绘制的功率序列（可多列，堆叠）
 						{"column_name": "煤电", "data": [2899.0, 2899.0]},
 						{"column_name": "气电", "data": [0.0, 0.0]}
-					]
-				},
-				"lines": {
-					"sheet_name": "逐小时结果",
-					"index": ["2030-01-01 00:00", "2030-01-01 01:00"],
-					"data": [ // 叠加的负荷参考线（2 条）
+					],
+					"lines_data": [ // 叠加的负荷参考线（2 条）
 						{"column_name": "原始负荷", "data": [7191.0, 6871.0]},
 						{"column_name": "响应后负荷", "data": [7191.0, 6871.0]}
 					]
 				}
-			}
-		]
-	}
+			]
+		}
+	},
+	"timestamp": "2026-10-21T10:00:00"
 }
 ```
 

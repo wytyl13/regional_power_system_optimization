@@ -42,7 +42,7 @@ from pydantic import BaseModel
 
 from assemble import RunConfig, po_AnalysisExport, po_run
 from convert import _included, _pick, convert
-from defaults import FIXED_PARAMS, build_form, merge_config
+from defaults import build_form, merge_config
 from parse_template import parse_template
 from position_chart import build_report
 from sheet_views import build_sheet_views
@@ -84,15 +84,13 @@ async def upload_dataset(file: Optional[UploadFile] = None):
     """上传收资模版：解析校验并注册 dataset；不传 file 只回默认配置。
 
     Args:
-        file (UploadFile | None): 模版 xlsx；None 时只返回 config + fixedParams。
+        file (UploadFile | None): 模版 xlsx；None 时只返回 config。
 
     Returns:
-        dict: datasetId/area/year/categories/config/fixedParams/warnings/excludedUnits
-        （不传 file 时仅 config/fixedParams）。
+        dict: datasetId/area/year/categories/config/warnings（不传 file 时仅 config）。
     """
     if file is None or not file.filename:      # 不传 file → 只返回基础配置（无模版，无 datasetId）
-        return make_response({"config": build_form(merge_config(None), ["平水年", "枯水年"]),
-                              "fixedParams": FIXED_PARAMS})
+        return make_response({"config": build_form(merge_config(None), ["平水年", "枯水年"])})
     if not file.filename.endswith(".xlsx"):
         raise BizError("只接受 .xlsx 模版文件", 400)   # 参数错 400（skill §7），走统一壳
     ds_id = "ds_" + uuid.uuid4().hex[:12]
@@ -143,11 +141,12 @@ async def upload_dataset(file: Optional[UploadFile] = None):
 
     DATASETS[ds_id] = {"path": str(path), "parsed": parsed,
                        "area": parsed["area"], "year": year, "uploadedAt": _now()}
+    if excluded:                                # 未纳入明细只进服务日志（前端看 warnings 汇总）
+        print("[datasets] 未纳入机组明细 %s: %s" % (ds_id, "；".join(excluded)))
     return make_response({"datasetId": ds_id, "area": parsed["area"], "year": year,
                           "categories": categories,
                           "config": build_form(defaults, hydrology),
-                          "fixedParams": FIXED_PARAMS,
-                          "warnings": warnings, "excludedUnits": excluded})
+                          "warnings": warnings})
 
 
 # ============ GET /api/datasets/{id}/curves/{sheet}（懒加载）============
@@ -448,7 +447,7 @@ def _run_job(job_id: str):
         "report": build_report(inp, solution, metrics, sc["hydrology"]),
         # config：与 /api/datasets 下发的 config 同格式（build_form 表单结构），值为本次生效配置
         "config": build_form(cfg, sorted({k[1] for k in ds["parsed"]["hydroCurves"]})),
-        # views：前端唯一渲染入口（list：series/lines 各带 sheet_name/index/data）
+        # views：前端唯一渲染入口（list：sheet_name/index 组级共享 + series_data/lines_data）
         "views": build_sheet_views(solution),
     }
     job["report"] = result["report"]

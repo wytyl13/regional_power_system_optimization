@@ -4,9 +4,10 @@
 @Time    : 2026/10/20 15:40
 @Author  : weiyutao
 @File    : sheet_views.py
-solution.sheets → 前端 views list（2026-10-20 与用户定稿格式）：
-  [{"series": {sheet_name, index, data:[{column_name, data}]},
-    "lines":  {sheet_name, index, data:[{column_name, data}]}}]
+solution.sheets → 前端 views list（2026-10-21 用户定稿，取代 10-20 的
+series/lines 各带整块：sheet_name/index 提到组级共享，键名改 *_data）：
+  [{"sheet_name": ..., "index": [...],
+    "series_data": [{column_name, data}], "lines_data": [{column_name, data}]}]
 映射表在下方两常量：取啥 sheet 列 → 映射成啥名；sheet 缺列（未装机）跳过。
 时间轴随各块自带（index = sheet 日期索引），不再单列 result.time。
 """
@@ -34,21 +35,21 @@ HOURLY_LINES_MAP = {
 
 
 def build_sheet_views(solution) -> list:
-    """逐小时结果 sheet → views list（series/lines 各带 sheet_name/index/data）。
+    """逐小时结果 sheet → views list（sheet_name/index 组级共享 + series_data/lines_data）。
 
     Args:
         solution (Solution): 求解结果（sheets 属性含逐小时结果页）。
 
     Returns:
-        list: [ {series: {...}, lines: {...}} ]。
+        list: [ {sheet_name, index, series_data, lines_data} ]。
     """
     frame = solution.sheets["逐小时结果"]
     index = [str(t) for t in frame.index]
 
-    def block(mapping):
-        data = [{"column_name": name, "data": frame[col].tolist()}
+    def cols(mapping):
+        return [{"column_name": name, "data": frame[col].tolist()}
                 for col, name in mapping.items() if col in frame.columns]
-        return {"sheet_name": "逐小时结果", "index": index, "data": data}
 
-    return [{"series": block(HOURLY_SERIES_MAP),
-             "lines": block(HOURLY_LINES_MAP)}]
+    return [{"sheet_name": "逐小时结果", "index": index,
+             "series_data": cols(HOURLY_SERIES_MAP),
+             "lines_data": cols(HOURLY_LINES_MAP)}]

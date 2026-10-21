@@ -119,21 +119,25 @@ def main() -> int:
                            "submittedAt", "finishedAt", "result"}, set(result)
     r = result["result"]
     assert set(r) == {"report", "config", "views"}, set(r)
-    # views 契约：list，series/lines 各带 sheet_name/index/data
+    # views 契约（2026-10-21 定稿）：list，sheet_name/index 组级共享 + *_data 列集
     v = r["views"]
     assert isinstance(v, list) and len(v) == 1, v
-    for part in ("series", "lines"):
-        b = v[0][part]
-        assert b["sheet_name"] == "逐小时结果", b
-        assert b["index"] and b["data"], b
-        for col in b["data"]:
+    blk = v[0]
+    assert blk["sheet_name"] == "逐小时结果", blk
+    assert blk["index"], blk
+    for part in ("series_data", "lines_data"):
+        assert blk[part], part
+        for col in blk[part]:
             assert set(col) == {"column_name", "data"}, col
-            assert len(col["data"]) == len(b["index"]), col["column_name"]
-    names = {c["column_name"] for c in v[0]["series"]["data"]}
+            assert len(col["data"]) == len(blk["index"]), col["column_name"]
+    names = {c["column_name"] for c in blk["series_data"]}
     assert names == {"煤电", "气电", "生物质", "核电", "径流式水电", "库容式水电",
                      "风电", "光伏", "抽水蓄能", "电化学储能", "友好电站"}, names
-    lines = {c["column_name"] for c in v[0]["lines"]["data"]}
+    lines = {c["column_name"] for c in blk["lines_data"]}
     assert lines == {"原始负荷", "响应后负荷"}, lines
+    # config 块：与 /api/datasets 下发同款数组树
+    assert isinstance(r["config"], list), type(r["config"])
+    assert r["config"][0]["group_name"] == "scenario", r["config"][0]
     out_path.write_text(json.dumps(result, ensure_ascii=False, indent=1),
                         encoding="utf-8")
     print("已写入: %s（%.1f KB）" % (out_path, out_path.stat().st_size / 1024))

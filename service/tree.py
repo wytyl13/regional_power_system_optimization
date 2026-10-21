@@ -7,9 +7,9 @@
 
 模版 xlsx → 前端展示契约两件套：
   build_categories：固定五大类菜单（负荷及备用/电源/送电协议/一体化电站/检修安排），
-    细分名=源 sheet 名；小表（源数据表/检修安排）全量内联 {name, columns, rows}；
-    曲线不内联，只给元数据 curve={sheet, filterBy, wholeSheet?}，前端点行后
-    调 GET /api/datasets/{id}/curves/{sheet}?<filterBy=值> 懒加载。
+    细分名=源 sheet 名；小表（源数据表/检修安排）全量内联 {sheet_name, columns, rows}；
+    曲线不内联，只给元数据 curve={sheet_name, filterBy, match, wholeSheet?}，前端点行后
+    调 GET /api/datasets/{id}/curves/{sheet_name}?<filterBy=值> 懒加载。
   read_curve：曲线懒加载端点的取数实现（匹配规则集中本文件，app.py 只调）。
 规则（两版模版通吃，服务端收口）：
   精确匹配：负荷/常规水电/送电协议曲线；风电=源表站名前缀归一（旧模版曲线为省略写法）；
@@ -64,7 +64,7 @@ def _s(v) -> str:
 
 
 def _table(wb, sheet_name: str) -> dict | None:
-    """源 sheet → {name, columns, rows}（全字符串、模版表头原样）。
+    """源 sheet → {sheet_name, columns, rows}（全字符串、模版表头原样）。
     sheet 不存在或无表头 → None（不出现在菜单）。不洗尾部说明行：
     尾行若有文字说明也如实展示（收资文件长什么样前端就看到什么样）。
 
@@ -73,7 +73,7 @@ def _table(wb, sheet_name: str) -> dict | None:
         sheet_name (str): 源 sheet 名。
 
     Returns:
-        dict | None: {name, columns, rows}；sheet 缺失/无表头 → None。
+        dict | None: {sheet_name, columns, rows}；sheet 缺失/无表头 → None。
     """
     if sheet_name not in wb.sheetnames:
         return None
@@ -87,11 +87,12 @@ def _table(wb, sheet_name: str) -> dict | None:
         if r is None or all(v is None for v in r):
             continue
         rows.append({c: _s(r[j]) if j < len(r) else "" for c, j in colIdx.items()})
-    return {"name": sheet_name, "columns": list(colIdx), "rows": rows}
+    # 20261021 定稿：表名键 = sheet_name（值即模版 sheet 名，与曲线端点/views 键名统一）
+    return {"sheet_name": sheet_name, "columns": list(colIdx), "rows": rows}
 
 
 def _curve_meta(sheet: str) -> dict | None:
-    """细分名 → 曲线懒加载元数据 {sheet, filterBy, match, wholeSheet?}。
+    """细分名 → 曲线懒加载元数据 {sheet_name, filterBy, match, wholeSheet?}。
 
     Args:
         sheet (str): 细分名（CURVE_RULES 的键）。
@@ -102,7 +103,8 @@ def _curve_meta(sheet: str) -> dict | None:
     if sheet not in CURVE_RULES:
         return None
     target, filter_by, match, drop = CURVE_RULES[sheet]
-    meta = {"sheet": target, "filterBy": filter_by, "match": match}
+    # 20261021 定稿：sheet → sheet_name（与懒加载端点返回/views 键名统一）
+    meta = {"sheet_name": target, "filterBy": filter_by, "match": match}
     if match == "whole":
         meta["wholeSheet"] = True
     return meta
@@ -110,7 +112,7 @@ def _curve_meta(sheet: str) -> dict | None:
 
 def build_categories(path) -> list[dict]:
     """模版文件 → 固定五大类数组（顺序即渲染序，前端照序展示零写死）。
-    有 items → 二级菜单；无 items（送电协议）→ 本级直接挂 tables。
+    有 data → 二级菜单；无 data（送电协议）→ 本级直接挂 tables。
 
     Args:
         path: 模版文件路径。
@@ -124,7 +126,7 @@ def build_categories(path) -> list[dict]:
         for cat_name, item_sheets in CATEGORY_MAP:
             if not item_sheets:
                 t = _table(wb, cat_name)
-                cat = {"name": cat_name,
+                cat = {"group_name": cat_name,
                        "tables": [t] if t else [],
                        "curve": _curve_meta(cat_name)}
                 if not cat["tables"] and not cat["curve"]:
@@ -136,10 +138,12 @@ def build_categories(path) -> list[dict]:
                 t = _table(wb, s)
                 if t is None:
                     continue      # sheet 缺失 → 细分不出现，不造空表
-                items.append({"name": s, "tables": [t],
+                items.append({"sub_group_name": s, "tables": [t],
                               **({"curve": c} if (c := _curve_meta(s)) else {})})
             if items:
-                categories.append({"name": cat_name, "items": items})
+                # 20261021 定稿：键名与 config 树同轨（group_name/sub_group_name/data），
+                # 单轨中文名——categories 纯只读不回传，名字是标签不是地址，不配 label
+                categories.append({"group_name": cat_name, "data": items})
         return categories
     finally:
         wb.close()
@@ -224,16 +228,17 @@ if __name__ == "__main__":
     for path in (sys.argv[1:] or [r"..\docs\数据模版-海南.xlsx"]):
         print(f"===== {path}")
         cats = build_categories(path)
-        assert [c["name"] for c in cats] == ["负荷及备用", "电源", "送电协议",
-                                             "一体化电站", "检修安排"]
+        assert [c["group_name"] for c in cats] == ["负荷及备用", "电源", "送电协议",
+                                                   "一体化电站", "检修安排"]
         for c in cats:
-            subs = [i["name"] for i in c.get("items", [])]
-            print(" ", c["name"], subs or "<tables at this level>")
+            subs = [i["sub_group_name"] for i in c.get("data", [])]
+            print(" ", c["group_name"], subs or "<tables at this level>")
             if "curve" in c:
                 print("    curve:", json.dumps(c["curve"], ensure_ascii=False))
-            for i in c.get("items", []):
+            for i in c.get("data", []):
                 if "curve" in i:
-                    print(f"    {i['name']}.curve:", json.dumps(i["curve"], ensure_ascii=False))
+                    print(f"    {i['sub_group_name']}.curve:",
+                          json.dumps(i["curve"], ensure_ascii=False))
         # 曲线懒加载三连：负荷（exact）/ 风电（prefix，旧模版）/ 光伏（whole）
         load_rows = read_curve(path, "负荷-8760", {"区域": "海南"})
         assert len(load_rows["index"]) == 365 and len(load_rows["data"]) == 24, load_rows.get("sheet_name")

@@ -290,43 +290,67 @@ def merge_config(user: dict | None) -> dict:
     return cfg
 
 
-# ---- 服务端固定口径（convert.py 写死、config 改不动的部分；/api/datasets 只读展示）----
-FIXED_PARAMS = [
-    {"key": "wanToMW", "label": "容量单位换算",
-     "value": "源表装机为 万kW 口径：容量 ×10 → MW；曲线为归一化因子，负荷=因子×最大负荷"},
-    {"key": "curveBlend", "label": "8760 曲线合成",
-     "value": "风电=纳入电站出力曲线按装机容量加权合成一条容量因子；光伏=全区一条因子"},
-    {"key": "energyFormula", "label": "储能容量换算",
-     "value": "储能容量 = 功率 × 时长 × √(源表转换效率) ÷ 0.8（抽蓄/新型储能/友好站三处同式）"},
-    {"key": "coalEmissionNodes", "label": "煤电碳排线性化",
-     "value": "Pmin→Pmax 等分 6 节点；节点速率 = 单位热值碳排 × 3.6 ÷ 发电效率 × P"
-              " × (1 + 低位修正系数 × (1 − P÷CAP))，系数可在 emission 配置组修改"},
-    {"key": "weekAnchor", "label": "周锚点口径",
-     "value": "备用需求/需求响应潜力按当周最大负荷的比例展开；含 1月1日 的那周周一为第 1 周"},
-    {"key": "maintenanceParse", "label": "煤电检修口径",
-     "value": "源表逐日标记为 1 的连续日期折算为起止区间（右端排他），不连续即报错"},
-    {"key": "windCurveMatch", "label": "风电曲线匹配",
-     "value": "出力曲线站名按源表电站名前缀归一（曲线表为省略写法，两版模版通吃）"},
-    {"key": "pvCurveRule", "label": "光伏曲线口径",
-     "value": "光伏出力曲线整表对应全区一条因子，电站名称列不作实体键"},
-]
+# ---- 服务端固定口径（convert.py 写死、config 改不动的部分）----
+# 20261021 接口瘦身：FIXED_PARAMS 不再随 /api/datasets 下发（前端从未渲染，受众是人）。
+# 口径文字沉淀于 skill api-json-format 与 docs；如需恢复下发见 git 历史。
 
 
-def build_form(defaults: dict, hydrology: list) -> dict:
+# 组/子组名 → 中文标题（20261021 用户定稿：config 表单为数组树，组名自带标题）
+GROUP_TITLES = {
+    "scenario": "情景", "solver": "求解器", "province": "省级参数",
+    "penalties": "惩罚与排放价格", "demandResponse": "需求响应",
+    "units": "机组信息", "emission": "排放参数",
+    "coal": "煤电", "gas": "气电", "nuclear": "核电", "biomass": "生物质",
+    "hydro": "常规水电", "wind": "风电", "pv": "光伏", "pumpedStorage": "抽水蓄能",
+    "storage": "新型储能", "friendlyStation": "友好电站",
+}
+
+
+def _form_fields(prefix: str, kv: dict, hydrology: list) -> list:
+    """一组参数 → 字段条目列表；结构键（非标量 value）不下发。
+
+    Args:
+        prefix (str): 字段全路径前缀（组名或 units.子组名），查 FIELDS_MAPPING 用。
+        kv (dict): 该组参数字典。
+        hydrology (list[str]): 水文情景枚举（scenario.hydrology 的 options）。
+
+    Returns:
+        list: [{field_name, label, value[, options]}]。
+    """
+    out = []
+    for k, v in kv.items():
+        if isinstance(v, (dict, list)):
+            continue          # 结构键（服务端内部路由，如 wind.classes）不进表单
+        f = {"field_name": k,
+             "label": FIELDS_MAPPING.get(f"{prefix}.{k}", f"{prefix}.{k}"), "value": v}
+        if prefix == "scenario" and k == "hydrology":
+            f["options"] = sorted(hydrology)
+        out.append(f)
+    return out
+
+
+def build_form(defaults: dict, hydrology: list) -> list:
     """配置默认值 + 字段标签 → /api/datasets 的 config 表单块
-    {组:{键:{label, value, options?}}}。wire 格式不变：提交计算时前端只回
-    {组:{键:值}}（POST /api/jobs 原契约），label/options 剥掉不回传。
+    （20261021 用户定稿，取代 20261020 的 {组:{键:{label,value}}} 嵌套对象）：
+    [{group_name, label, data:[{field_name, label, value[, options]}]}]；
+    units 组的 data 为子组 [{sub_group_name, label, data:[字段]}]。
+    提交端不变：POST /api/jobs 仍收裸嵌套 {组:{键:值}}（merge_config 原生格式），
+    前端不回传渲染树。
 
     Args:
         defaults (dict): 生效配置（merge_config 产物，可含收资浮出值）。
         hydrology (list[str]): 水文情景枚举（模版实际曲线）。
 
     Returns:
-        dict: config 表单块。
+        list: config 表单块（数组树）。
     """
-    form = {}
+    form = []
     for g, kv in defaults.items():
-        form[g] = {k: {"label": FIELDS_MAPPING.get(f"{g}.{k}", f"{g}.{k}"), "value": v}
-                   for k, v in kv.items()}
-    form["scenario"]["hydrology"]["options"] = sorted(hydrology)
+        if g == "units":
+            data = [{"sub_group_name": sub, "label": GROUP_TITLES.get(sub, sub),
+                     "data": _form_fields(f"units.{sub}", params, hydrology)}
+                    for sub, params in kv.items()]
+        else:
+            data = _form_fields(g, kv, hydrology)
+        form.append({"group_name": g, "label": GROUP_TITLES.get(g, g), "data": data})
     return form
